@@ -20,6 +20,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+
 # DEFAULT_MODEL = 'BAAI/bge-m3'
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
