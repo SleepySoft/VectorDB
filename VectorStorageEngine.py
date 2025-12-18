@@ -1,15 +1,15 @@
 import gc
-import json
 import os
+import time
+import json
+import queue
 import shutil
 import datetime
 import logging
 import threading
-import queue
-import time
 import numpy as np
-from typing import List, Dict, Any, Union, Optional
 from chromadb import Settings
+from typing import List, Dict, Any, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -649,23 +649,41 @@ class VectorCollectionRepo:
             "offset": offset
         }
 
-    def _extract_features(self, metadatas: List[Dict], weights: Dict[str, float]) -> np.ndarray:
-        """
-        Helper: Convert metadata into normalized numerical features.
-        """
-        import numpy as np
+    def _extract_features(self,
+                          metadatas: List[Dict],
+                          weights: Dict[str, float],
+                          time_field: str = "timestamp",
+                          includes_metas: Optional[List[str]] = None
+                          ) -> np.ndarray:
         from sklearn.preprocessing import MinMaxScaler
 
-        # 1. Temporal Feature
-        times = np.array([m.get("timestamp", 0) for m in metadatas]).reshape(-1, 1)
+        # 1. Temporal Feature (保持不变，如果没有 timestamp 默认为 0)
+        times = np.array([m.get(time_field, 0) for m in metadatas]).reshape(-1, 1)
 
-        # 2. Entity Density Feature (Combined count of entities)
-        ents = np.array([
-            len(m.get("person_list", [])) +
-            len(m.get("org_list", [])) +
-            len(m.get("loc_list", []))
-            for m in metadatas
-        ]).reshape(-1, 1)
+        # 2. Generic Density Feature (通用密度特征)
+        # 逻辑：把 includes_metas 里提到的所有字段的信息量加起来
+        densities = []
+
+        target_keys = includes_metas if includes_metas else []
+
+        for m in metadatas:
+            score = 0
+            for key in target_keys:
+                val = m.get(key)
+
+                # 此时 val 已经被 _smart_parse_value 处理过，可能是 List, Dict, Str, Int
+                if isinstance(val, list):
+                    score += len(val)  # 列表贡献长度权重
+                elif isinstance(val, dict):
+                    score += len(val)  # 字典贡献键值对数量
+                elif isinstance(val, (int, float)):
+                    score += float(val)  # 数值直接贡献大小
+                elif val:
+                    score += 1  # 非空字符串贡献 1 分
+
+            densities.append(score)
+
+        ents = np.array(densities).reshape(-1, 1)
 
         # Scale to [0, 1]
         scaler = MinMaxScaler()
@@ -674,59 +692,88 @@ class VectorCollectionRepo:
 
         return np.hstack([norm_times, norm_ents])
 
-    def _aggregate_to_articles(self, results: Dict, weights: Dict[str, float]):
-        """
-        Helper: Group chunks by original_doc_id and combine their vectors.
-        """
-        import numpy as np
+    def _aggregate_to_articles(self,
+                               results: Dict,
+                               weights: Dict[str, float],
+                               time_field: str = "timestamp",
+                               includes_metas: Optional[List[str]] = None
+                               ):
         doc_groups = {}
 
         for i in range(len(results['ids'])):
-            meta = results['metadatas'][i]
-            d_id = meta.get("original_doc_id", "unknown")
+            # --- 1. 智能清洗 Metadata ---
+            raw_meta = results['metadatas'][i]
+            clean_meta = {}
+            for k, v in raw_meta.items():
+                # 只有当字段在 includes_metas 里，或者没传 includes_metas (全都要) 时，才解析
+                if includes_metas is None or k in includes_metas or k == time_field or k == "original_doc_id":
+                    clean_meta[k] = self._smart_parse_value(v)
+                else:
+                    clean_meta[k] = v
+                    # ---------------------------
+
+            d_id = clean_meta.get("original_doc_id", "unknown")
 
             if d_id not in doc_groups:
                 doc_groups[d_id] = {
                     "embeddings": [],
-                    "metadata": meta,
+                    "metadata": clean_meta,  # 使用清洗后的
                     "text": results['documents'][i][:150]
                 }
             doc_groups[d_id]["embeddings"].append(results['embeddings'][i])
 
         article_ids = list(doc_groups.keys())
 
-        # Calculate mean embeddings and normalize
         semantic_vecs = []
         for d_id in article_ids:
             avg_emb = np.mean(doc_groups[d_id]["embeddings"], axis=0)
             avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-9)
             semantic_vecs.append(avg_emb * weights.get("semantic", 1.0))
 
-        # Extract metadata features
+        # 传递 includes_metas 给特征提取器
         meta_features = self._extract_features(
-            [doc_groups[d_id]["metadata"] for d_id in article_ids],
-            weights
+            metadatas=[doc_groups[d_id]["metadata"] for d_id in article_ids],
+            weights=weights,
+            time_field=time_field,
+            includes_metas=includes_metas
         )
 
-        # Final combined matrix: [Semantic (1024) + Meta Features (N)]
         X = np.hstack([np.array(semantic_vecs), meta_features])
         previews = [doc_groups[d_id]["text"] for d_id in article_ids]
 
         return X, article_ids, previews
 
-    def analyze_clusters(self, n_clusters: int = 20, max_samples: int = 50000,
-                         config: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _smart_parse_value(self, value: Any) -> Any:
+        """
+        尝试将字符串还原为 Python 对象（List/Dict）。
+        如果失败，或者不是字符串，则原样返回。
+        """
+        if not isinstance(value, str):
+            return value
+
+        stripped = value.strip()
+        if not (stripped.startswith('[') or stripped.startswith('{')):
+            return value
+
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+
+    def analyze_clusters(self,
+                         n_clusters: int = 20,
+                         max_samples: int = 50000,
+                         config: Dict[str, Any] = None,
+                         time_field: str = "timestamp",
+                         includes_metas: Optional[list] = None) -> Dict[str, Any]:
         """
         Main Orchestrator for Analysis.
         config example: {"weights": {"semantic": 1.0, "time": 0.5}, "use_pca": True}
         """
-        import numpy as np
         from sklearn.cluster import MiniBatchKMeans
         from sklearn.decomposition import PCA
-        import time  # 确保导入time
 
         config = config or {"weights": {"semantic": 1.0, "time": 0.2, "entities": 0.5}}
-        weights = config.get("weights")
 
         # --- 1. Data Retrieval (Batch Fetching for Memory Safety) ---
         # 即使只采样 5w 条，一次性 load进内存也很大，建议分批读
@@ -740,7 +787,7 @@ class VectorCollectionRepo:
         accumulated_metadatas = []
         accumulated_docs = []
 
-        processed = 0  # <--- [FIX] 初始化变量
+        processed = 0
 
         while processed < target_limit:
             fetch_size = min(BATCH_SIZE, target_limit - processed)
@@ -760,7 +807,7 @@ class VectorCollectionRepo:
             accumulated_metadatas.extend(results['metadatas'])
             accumulated_docs.extend(results['documents'])
 
-            processed += len(results['ids'])  # <--- [FIX] 累加计数
+            processed += len(results['ids'])
 
             # 简单的防卡死 sleep，让出 GIL
             time.sleep(0.01)
@@ -777,7 +824,12 @@ class VectorCollectionRepo:
         }
 
         # --- 2. Aggregation & Feature Fusion ---
-        X, article_ids, previews = self._aggregate_to_articles(raw_data, weights)
+        X, article_ids, previews = self._aggregate_to_articles(
+            raw_data,
+            config.get("weights"),
+            time_field=time_field,
+            includes_metas=includes_metas
+        )
 
         # --- 3. Dimensionality Reduction (For visualization) ---
         pca = PCA(n_components=2)
@@ -825,7 +877,7 @@ class VectorCollectionRepo:
 
         return {
             "total_articles": len(article_ids),
-            "total_chunks_scanned": processed,  # <--- [FIX] 现在引用是安全的
+            "total_chunks_scanned": processed,
             "clusters": clusters_info,
             "points": points_data
         }
