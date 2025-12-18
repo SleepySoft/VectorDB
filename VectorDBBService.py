@@ -1,8 +1,11 @@
 import os
+import time
+import uuid
 import logging
 import argparse
 import tempfile
 from typing import Optional, Callable, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, request, jsonify, send_file, Response
 
 # Import the core engine defined in the previous step
@@ -41,6 +44,9 @@ class VectorDBService:
         self._base_dir = os.path.dirname(os.path.abspath(__file__))
         self._frontend_path = os.path.join(self._base_dir, self.frontend_filename)
 
+        self._analysis_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisWorker")
+        self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
+
         if not os.path.exists(self._frontend_path):
             logger.warning(f"Frontend file not found at: {self._frontend_path}")
 
@@ -51,6 +57,30 @@ class VectorDBService:
         Args:
             wrapper (Callable): Optional decorator to wrap all routes (e.g., for auth).
         """
+
+        def run_analysis_task(job_id: str, collection_name: str, n_clusters: int, max_samples: int):
+            """在后台线程中实际执行分析"""
+            try:
+                # 更新状态
+                self._analysis_jobs[job_id]["status"] = "processing"
+
+                # 获取 Repo (这里假设 Engine 已经是 Ready 的，因为提交时检查过)
+                repo = self.engine.get_repository(collection_name)
+                if not repo:
+                    raise ValueError(f"Collection {collection_name} not found")
+
+                # *** 执行核心耗时操作 ***
+                # 注意：max_samples 对于几十万数据非常重要，建议默认限制在 50000 以内
+                result = repo.analyze_clusters(n_clusters=n_clusters, max_samples=max_samples)
+
+                self._analysis_jobs[job_id]["result"] = result
+                self._analysis_jobs[job_id]["status"] = "completed"
+
+            except Exception as e:
+                logger.error(f"Analysis job {job_id} failed: {e}")
+                self._analysis_jobs[job_id]["error"] = str(e)
+                self._analysis_jobs[job_id]["status"] = "failed"
+
         bp = Blueprint("vector_db", __name__, static_folder=None)
 
         # Helper to apply wrapper if it exists
@@ -352,6 +382,81 @@ class VectorDBService:
                 return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+
+        @route("/api/collections/<name>/analysis", methods=["POST"])
+        def trigger_analysis(name):
+            """
+            Step 1: 提交分析任务
+            """
+            # 清理超过 1 小时的旧任务
+            current_time = time.time()
+            expired_jobs = [jid for jid, j in self._analysis_jobs.items() if current_time - j['created_at'] > 3600]
+            for jid in expired_jobs:
+                del self._analysis_jobs[jid]
+
+            # 1. 检查 Engine 状态
+            if not self.engine.is_ready():
+                return jsonify({"error": "Engine is initializing"}), 503
+
+            # 2. 解析参数
+            data = request.json or {}
+            n_clusters = int(data.get("n_clusters", 15))
+            max_samples = data.get("max_samples", 20000)  # 默认限制采样，保护内存
+
+            # 3. 创建 Job ID
+            job_id = str(uuid.uuid4())
+            self._analysis_jobs[job_id] = {
+                "job_id": job_id,
+                "collection": name,
+                "status": "pending",
+                "created_at": time.time(),
+                "result": None
+            }
+
+            # 4. 提交到线程池
+            self._analysis_executor.submit(
+                run_analysis_task, job_id, name, n_clusters, max_samples
+            )
+
+            # 5. 立即返回 Job ID
+            return jsonify({
+                "status": "accepted",
+                "job_id": job_id,
+                "message": "Analysis started in background."
+            }), 202
+
+        @route("/api/analysis/<job_id>", methods=["GET"])
+        def get_analysis_result(job_id):
+            """
+            Step 2: 轮询任务结果
+            """
+            job = self._analysis_jobs.get(job_id)
+            if not job:
+                return jsonify({"error": "Job not found"}), 404
+
+            status = job["status"]
+
+            if status == "completed":
+                # 返回结果并清理内存 (Optional: 也可以保留一段时间，这里选择读后即焚或保留)
+                # 为了简单，我们不删除，让前端可以多次读取。
+                # 生产环境需要定期清理 self._analysis_jobs
+                return jsonify({
+                    "status": "completed",
+                    "data": job["result"]
+                })
+
+            elif status == "failed":
+                return jsonify({
+                    "status": "failed",
+                    "error": job.get("error")
+                }), 500
+
+            else:
+                # pending 或 processing
+                return jsonify({
+                    "status": status,
+                    "message": "Calculation in progress..."
+                }), 200
 
         return bp
 

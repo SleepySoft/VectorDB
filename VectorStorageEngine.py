@@ -627,3 +627,150 @@ class VectorCollectionRepo:
             "limit": limit,
             "offset": offset
         }
+
+    def analyze_clusters(self, n_clusters: int = 20, max_samples: int = 50000) -> Dict[str, Any]:
+        """
+        执行轻量级聚类分析和降维，用于生成“浏览视图”。
+
+        策略：
+        1. 使用 batch 方式从 DB 拉取向量 (避免 OOM)。
+        2. 使用 PCA (降维) + MiniBatchKMeans (聚类) 以保证速度和低内存占用。
+        3. 仅在内存中计算，不回写 DB，确保不锁定数据库写入。
+
+        Args:
+            n_clusters: 期望聚合成多少个主题 (如 20 个)。
+            max_samples: 即使有几十万数据，为了速度，通常采样 5w 条足以描绘分布形状。
+                         设为 None 则分析全量数据。
+
+        Returns:
+            Dict: 包含聚类中心、每个点的坐标(x,y)、所属簇、以及代表性文本。
+        """
+        try:
+            import numpy as np
+            from sklearn.cluster import MiniBatchKMeans
+            from sklearn.decomposition import PCA
+        except ImportError:
+            raise ImportError("Clustering requires: pip install scikit-learn numpy")
+
+        # 1. 获取数据总数
+        total_count = self.count()
+        if total_count == 0:
+            return {"error": "Collection is empty"}
+
+        # 确定采样步长 (如果数据量极大，进行均匀采样)
+        step = 1
+        limit = total_count
+        if max_samples and total_count > max_samples:
+            limit = max_samples
+            # 这里的采样通过 limit 实现，chroma 目前不支持随机采样，
+            # 生产环境通常取最近的 N 条，或者分段取。这里简单取前 N 条。
+
+        print(f"[Analysis] Fetching {limit} embeddings from Chroma...")
+
+        # 2. 批量拉取数据 (Batch Fetching)
+        # Chroma 的 get 方法如果一次拉取太大可能会崩，建议分批
+        BATCH_SIZE = 5000
+        all_embeddings = []
+        all_metadatas = []
+        all_ids = []
+        all_documents = []  # 只取前几十个字符预览
+
+        processed = 0
+        while processed < limit:
+            # 计算本次拉取数量
+            current_limit = min(BATCH_SIZE, limit - processed)
+
+            # 仅读取，SQLite 允许并发读，不影响 Engine 的写入线程
+            results = self._collection.get(
+                limit=current_limit,
+                offset=processed,
+                include=['embeddings', 'metadatas', 'documents']
+            )
+
+            if not results['ids']:
+                break
+
+            embeddings_batch = results['embeddings']
+
+            # 简单检查数据完整性
+            if embeddings_batch is None:
+                processed += current_limit
+                continue
+
+            all_embeddings.extend(embeddings_batch)
+            all_metadatas.extend(results['metadatas'])
+            all_ids.extend(results['ids'])
+            # 截取文档前 100 个字符用于预览，节省内存
+            all_documents.extend([doc[:100] for doc in results['documents']])
+
+            processed += len(results['ids'])
+            # 简单让出 CPU 时间片，避免占满资源
+            time.sleep(0.01)
+
+        # 转换为 Numpy 数组
+        X = np.array(all_embeddings)
+        print(f"[Analysis] Data loaded. Shape: {X.shape}")
+
+        # 3. 降维 (用于 2D 可视化) - PCA 极快
+        # 如果追求更漂亮的分布图，可用 UMAP，但几十万数据 UMAP 会很慢
+        print("[Analysis] Running PCA (Reduction to 2D)...")
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(X)  # 结果是 [[x1, y1], [x2, y2]...]
+
+        # 4. 聚类 - MiniBatchKMeans 速度快
+        print(f"[Analysis] Running MiniBatchKMeans (k={n_clusters})...")
+        kmeans = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            random_state=42,
+            batch_size=1024,
+            n_init="auto"
+        )
+        labels = kmeans.fit_predict(X)
+
+        # 5. 生成结果快照
+        # 我们需要找到每个簇的“中心点”代表文档，用来给这个簇起名字
+        cluster_summaries = {}
+
+        # 计算每个点到其簇中心的距离
+        # transform 返回每个点到所有中心的距离，我们取对应 label 的那个距离
+        dist_matrix = kmeans.transform(X)
+
+        points_data = []
+
+        # 预处理：按簇分组，找到距离中心最近的文档
+        min_dist_per_cluster = {i: float('inf') for i in range(n_clusters)}
+        representative_doc_per_cluster = {i: "Unknown Topic" for i in range(n_clusters)}
+
+        for i in range(len(all_ids)):
+            cluster_id = int(labels[i])
+            dist = dist_matrix[i][cluster_id]
+
+            # 记录数据点供前端绘图
+            points_data.append({
+                "id": all_ids[i],
+                "x": round(float(coords[i][0]), 4),  # 保留4位小数减小JSON体积
+                "y": round(float(coords[i][1]), 4),
+                "cluster": cluster_id,
+                "preview": all_documents[i],
+                "doc_id": all_metadatas[i].get("original_doc_id", "unknown")
+            })
+
+            # 更新该簇的代表性文档（离中心最近的点）
+            if dist < min_dist_per_cluster[cluster_id]:
+                min_dist_per_cluster[cluster_id] = dist
+                representative_doc_per_cluster[cluster_id] = all_documents[i]
+
+        # 汇总簇信息
+        clusters_info = []
+        for i in range(n_clusters):
+            clusters_info.append({
+                "cluster_id": i,
+                "topic_preview": representative_doc_per_cluster[i],  # 前端可以用这个发给 LLM 总结标题
+                "count": int(np.sum(labels == i))
+            })
+
+        return {
+            "total_analyzed": len(all_ids),
+            "clusters": clusters_info,
+            "points": points_data  # 前端用 scatter plot 渲染这个
+        }

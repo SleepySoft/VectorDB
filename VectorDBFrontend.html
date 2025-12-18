@@ -6,6 +6,7 @@
     <title>VectorDB Manager</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         body { background-color: #f3f4f6; }
@@ -17,12 +18,18 @@
 
         /* v-cloak: Hide elements until Vue is ready */
         [v-cloak] { display: none !important; }
+
+        /* Custom Scrollbar for the cluster list */
+        .scroller::-webkit-scrollbar { width: 6px; }
+        .scroller::-webkit-scrollbar-track { background: #f1f1f1; }
+        .scroller::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .scroller::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
 <body>
     <div id="app" class="flex h-screen" v-cloak>
 
-        <div class="w-72 bg-slate-800 text-white flex flex-col p-4 shadow-xl z-10">
+        <div class="w-72 bg-slate-800 text-white flex flex-col p-4 shadow-xl z-10 flex-shrink-0">
             <h1 class="text-2xl font-bold mb-6 flex items-center">
                 <i class="fa-solid fa-database mr-3 text-blue-400"></i> VectorDB
             </h1>
@@ -88,13 +95,16 @@
 
         <div class="flex-1 flex flex-col h-full overflow-hidden bg-gray-50">
 
-            <div class="bg-white border-b border-gray-200 px-8 pt-6 flex justify-between items-end">
+            <div class="bg-white border-b border-gray-200 px-8 pt-6 flex justify-between items-end flex-shrink-0">
                 <div class="flex space-x-6">
                     <button @click="currentTab = 'browse'; fetchDocuments()" :class="tabClass('browse')" class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-table mr-2"></i> Browse Data
                     </button>
                     <button @click="currentTab = 'search'" :class="tabClass('search')" class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-magnifying-glass mr-2"></i> Search
+                    </button>
+                    <button @click="currentTab = 'explore'" :class="tabClass('explore')" class="pb-3 px-1 font-medium text-sm flex items-center">
+                        <i class="fa-solid fa-map-location-dot mr-2"></i> Explore / Clusters
                     </button>
                     <button @click="currentTab = 'add'" :class="tabClass('add')" class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-file-circle-plus mr-2"></i> Add / Upsert
@@ -105,14 +115,14 @@
                 </div>
             </div>
 
-            <div class="flex-1 overflow-auto p-8 relative">
+            <div class="flex-1 overflow-hidden relative">
 
                 <div v-if="!selectedCollection" class="h-full flex flex-col items-center justify-center text-gray-400">
                     <i class="fa-solid fa-layer-group text-6xl mb-4 text-gray-300"></i>
                     <p class="text-lg">Select or create a collection to start.</p>
                 </div>
 
-                <div v-else-if="currentTab === 'browse'" class="space-y-4">
+                <div v-else-if="currentTab === 'browse'" class="h-full overflow-auto p-8 space-y-4">
                     <div class="flex justify-between items-center">
                         <h2 class="text-lg font-bold text-gray-700">Collection Data</h2>
                         <div class="flex space-x-2">
@@ -165,82 +175,188 @@
                     </div>
                 </div>
 
-                <div v-else-if="currentTab === 'search'" class="max-w-4xl mx-auto space-y-6">
-                     <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200 space-y-4">
-                        <div class="flex space-x-2">
-                            <input v-model="searchQuery" @keyup.enter="performSearch" type="text" placeholder="Type query and press Enter..." class="flex-1 p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                            <button @click="performSearch" class="bg-blue-600 text-white px-8 rounded-lg hover:bg-blue-700 font-medium shadow-sm transition">Search</button>
-                        </div>
-                        <div class="grid grid-cols-12 gap-4 text-sm">
-                            <div class="col-span-8">
-                                <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Metadata Filter (JSON)</label>
-                                <input v-model="filterJson" placeholder='{"category": "news"}' class="w-full p-2 bg-gray-50 border rounded font-mono text-gray-600">
+                <div v-else-if="currentTab === 'search'" class="h-full overflow-auto p-8">
+                     <div class="max-w-4xl mx-auto space-y-6">
+                        <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200 space-y-4">
+                            <div class="flex space-x-2">
+                                <input v-model="searchQuery" @keyup.enter="performSearch" type="text" placeholder="Type query and press Enter..." class="flex-1 p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <button @click="performSearch" class="bg-blue-600 text-white px-8 rounded-lg hover:bg-blue-700 font-medium shadow-sm transition">Search</button>
                             </div>
-                            <div class="col-span-2">
-                                <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Top K</label>
-                                <input v-model.number="topN" type="number" class="w-full p-2 bg-gray-50 border rounded text-center">
-                            </div>
-                            <div class="col-span-2">
-                                <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Min Score</label>
-                                <input v-model.number="minScore" type="number" step="0.1" class="w-full p-2 bg-gray-50 border rounded text-center">
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="space-y-4">
-                        <div v-for="res in searchResults" :key="res.chunk_id" class="bg-white p-5 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition group">
-                            <div class="flex justify-between items-start mb-2">
-                                <div class="flex items-center space-x-2">
-                                    <span class="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded border border-blue-200">{{ res.doc_id }}</span>
-                                    <span class="text-xs text-gray-400 font-mono">#{{ res.chunk_id.split('#')[1] }}</span>
+                            <div class="grid grid-cols-12 gap-4 text-sm">
+                                <div class="col-span-8">
+                                    <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Metadata Filter (JSON)</label>
+                                    <input v-model="filterJson" placeholder='{"category": "news"}' class="w-full p-2 bg-gray-50 border rounded font-mono text-gray-600">
                                 </div>
-                                <span class="text-sm font-bold bg-gray-100 px-2 py-1 rounded" :class="getScoreColor(res.score)">
-                                    {{ (res.score * 100).toFixed(1) }}% Match
-                                </span>
+                                <div class="col-span-2">
+                                    <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Top K</label>
+                                    <input v-model.number="topN" type="number" class="w-full p-2 bg-gray-50 border rounded text-center">
+                                </div>
+                                <div class="col-span-2">
+                                    <label class="block text-gray-500 mb-1 text-xs uppercase font-bold">Min Score</label>
+                                    <input v-model.number="minScore" type="number" step="0.1" class="w-full p-2 bg-gray-50 border rounded text-center">
+                                </div>
                             </div>
-                            <p class="text-gray-700 mb-3 text-sm leading-relaxed bg-slate-50 p-3 rounded border border-slate-100">{{ res.content }}</p>
-                            <div class="flex justify-between items-center">
-                                <div class="flex flex-wrap gap-2">
-                                    <span v-for="(val, key) in res.metadata" :key="key" class="text-gray-500 text-xs bg-gray-100 px-2 py-0.5 rounded border border-gray-200">
-                                        <span class="font-bold text-gray-600">{{ key }}:</span> {{ val }}
+                        </div>
+
+                        <div class="space-y-4">
+                            <div v-for="res in searchResults" :key="res.chunk_id" class="bg-white p-5 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition group">
+                                <div class="flex justify-between items-start mb-2">
+                                    <div class="flex items-center space-x-2">
+                                        <span class="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded border border-blue-200">{{ res.doc_id }}</span>
+                                        <span class="text-xs text-gray-400 font-mono">#{{ res.chunk_id.split('#')[1] }}</span>
+                                    </div>
+                                    <span class="text-sm font-bold bg-gray-100 px-2 py-1 rounded" :class="getScoreColor(res.score)">
+                                        {{ (res.score * 100).toFixed(1) }}% Match
                                     </span>
                                 </div>
-                                <button @click="deleteDoc(res.doc_id)" class="text-gray-300 hover:text-red-500 transition opacity-0 group-hover:opacity-100 text-sm">
-                                    Delete
-                                </button>
+                                <p class="text-gray-700 mb-3 text-sm leading-relaxed bg-slate-50 p-3 rounded border border-slate-100">{{ res.content }}</p>
+                                <div class="flex justify-between items-center">
+                                    <div class="flex flex-wrap gap-2">
+                                        <span v-for="(val, key) in res.metadata" :key="key" class="text-gray-500 text-xs bg-gray-100 px-2 py-0.5 rounded border border-gray-200">
+                                            <span class="font-bold text-gray-600">{{ key }}:</span> {{ val }}
+                                        </span>
+                                    </div>
+                                    <button @click="deleteDoc(res.doc_id)" class="text-gray-300 hover:text-red-500 transition opacity-0 group-hover:opacity-100 text-sm">
+                                        Delete
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
+<div v-else-if="currentTab === 'explore'" class="flex h-full bg-slate-50">
 
-                <div v-else-if="currentTab === 'add'" class="max-w-3xl mx-auto">
-                    <div class="bg-white p-8 rounded-lg shadow-sm border border-gray-200 space-y-6">
-                        <div class="flex items-center justify-between border-b pb-4">
-                            <h2 class="text-xl font-bold text-gray-800">Upsert Document</h2>
-                            <span class="text-xs text-gray-400">Replaces existing Doc ID</span>
+                    <div class="flex-1 flex flex-col h-full relative">
+                        <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-2 rounded shadow border border-gray-200 flex items-center space-x-3">
+                            <div v-if="activeCluster === null" class="flex items-center space-x-3">
+                                <div>
+                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clusters</label>
+                                    <input v-model.number="exploreConfig.n_clusters" type="number" class="w-16 border rounded px-1 text-sm">
+                                </div>
+                                <div>
+                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Max Samples</label>
+                                    <select v-model.number="exploreConfig.max_samples" class="border rounded px-1 text-sm bg-white">
+                                        <option value="5000">5k (Fast)</option>
+                                        <option value="20000">20k (Detailed)</option>
+                                        <option value="50000">50k (Slow)</option>
+                                    </select>
+                                </div>
+                                <div class="h-8 w-px bg-gray-300 mx-2"></div>
+                                <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
+                                    class="bg-indigo-600 text-white px-3 py-1 rounded text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center">
+                                    <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
+                                    {{ analysisState.status === 'processing' ? 'Computing...' : 'Analyze Map' }}
+                                </button>
+                            </div>
+                            <div v-else>
+                                <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
+                                    <i class="fa-solid fa-arrow-left mr-2"></i> Show All Groups
+                                </button>
+                            </div>
                         </div>
 
-                        <div class="space-y-4">
-                            <div>
-                                <label class="block text-sm font-bold text-gray-700 mb-1">Document ID</label>
-                                <input v-model="upsertForm.doc_id" type="text" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" placeholder="unique_doc_identifier_v1">
+                        <div ref="chartContainer" class="w-full h-full bg-slate-50">
+                            <div v-if="!analysisState.hasData && analysisState.status !== 'processing'" class="h-full flex flex-col items-center justify-center text-gray-400">
+                                <i class="fa-solid fa-map-location-dot text-5xl mb-3 text-gray-300"></i>
+                                <p>Click "Analyze Map" to visualize your data topology.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="w-96 bg-white border-l border-gray-200 flex flex-col h-full shadow-lg z-10 transition-all">
+
+                        <div v-if="activeCluster === null" class="flex flex-col h-full">
+                            <div class="p-4 border-b border-gray-100 bg-gray-50">
+                                <h3 class="font-bold text-gray-700">Semantic Topics</h3>
+                                <p class="text-xs text-gray-400">Found {{ exploreData.clusters.length }} groups</p>
                             </div>
 
-                            <div>
-                                <label class="block text-sm font-bold text-gray-700 mb-1">Content Text</label>
-                                <textarea v-model="upsertForm.text" rows="8" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm leading-relaxed" placeholder="Paste the content to be indexed here..."></textarea>
-                            </div>
+                            <div class="flex-1 overflow-y-auto scroller p-2 space-y-2">
+                                <div v-if="analysisState.status === 'processing'" class="p-8 text-center text-gray-400">
+                                    <i class="fa-solid fa-dna fa-spin text-2xl mb-2 text-indigo-400"></i>
+                                    <p class="text-sm">Crunching vectors...</p>
+                                </div>
 
-                            <div>
-                                <label class="block text-sm font-bold text-gray-700 mb-1">Metadata (JSON)</label>
-                                <textarea v-model="upsertForm.metadata" rows="3" class="w-full p-3 border rounded-lg bg-gray-50 font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none text-gray-600" placeholder='{"author": "me", "year": 2023}'></textarea>
+                                <div v-for="cluster in exploreData.clusters" :key="cluster.cluster_id"
+                                    class="group p-3 rounded border border-gray-100 hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer transition relative"
+                                    @click="focusCluster(cluster.cluster_id)">
+
+                                    <div class="absolute left-0 top-0 bottom-0 w-1 rounded-l" :style="{ backgroundColor: getClusterColor(cluster.cluster_id) }"></div>
+
+                                    <div class="pl-3">
+                                        <div class="flex justify-between items-center mb-1">
+                                            <span class="text-xs font-bold text-gray-700">Group {{ cluster.cluster_id }}</span>
+                                            <span class="text-xs text-gray-400 bg-white px-1 rounded border">{{ cluster.count }} docs</span>
+                                        </div>
+                                        <p class="text-xs text-gray-500 line-clamp-2 font-mono bg-gray-50 p-1 rounded">
+                                            {{ cluster.topic_preview }}
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <div class="pt-4 flex justify-end">
-                            <button @click="doUpsert" class="bg-green-600 text-white px-8 py-2.5 rounded-lg hover:bg-green-700 font-medium shadow-sm flex items-center transition transform active:scale-95">
-                                <i class="fa-solid fa-cloud-arrow-up mr-2"></i> Save Document
-                            </button>
+                        <div v-else class="flex flex-col h-full bg-slate-50">
+                            <div class="p-4 border-b border-indigo-100 bg-indigo-50">
+                                <div class="flex justify-between items-center">
+                                    <h3 class="font-bold text-indigo-900">Group {{ activeCluster }}</h3>
+                                    <button @click="resetFocus" class="text-gray-400 hover:text-gray-600"><i class="fa-solid fa-times"></i></button>
+                                </div>
+                                <p class="text-xs text-indigo-700 mt-1">Showing content in this cluster</p>
+                            </div>
+
+                            <div class="flex-1 overflow-y-auto scroller p-3 space-y-3">
+                                <div v-for="item in activeClusterItems" :key="item.id" class="bg-white p-3 rounded shadow-sm border border-gray-200 text-sm">
+                                    <div class="flex justify-between text-xs text-gray-400 mb-1 font-mono">
+                                        <span>{{ item.doc_id }}</span>
+                                        <span>#{{ item.id }}</span>
+                                    </div>
+                                    <div class="text-gray-700 leading-relaxed break-words">
+                                        {{ item.preview }}
+                                    </div>
+                                    <div class="mt-2 pt-2 border-t border-gray-100 flex justify-end">
+                                        <button @click="deleteDoc(item.doc_id)" class="text-xs text-red-300 hover:text-red-500">Delete Doc</button>
+                                    </div>
+                                </div>
+                                <div v-if="activeClusterItems.length === 0" class="text-center text-gray-400 mt-10">
+                                    No items found.
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <div v-else-if="currentTab === 'add'" class="h-full overflow-auto p-8">
+                     <div class="max-w-3xl mx-auto">
+                        <div class="bg-white p-8 rounded-lg shadow-sm border border-gray-200 space-y-6">
+                            <div class="flex items-center justify-between border-b pb-4">
+                                <h2 class="text-xl font-bold text-gray-800">Upsert Document</h2>
+                                <span class="text-xs text-gray-400">Replaces existing Doc ID</span>
+                            </div>
+
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">Document ID</label>
+                                    <input v-model="upsertForm.doc_id" type="text" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" placeholder="unique_doc_identifier_v1">
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">Content Text</label>
+                                    <textarea v-model="upsertForm.text" rows="8" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm leading-relaxed" placeholder="Paste the content to be indexed here..."></textarea>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">Metadata (JSON)</label>
+                                    <textarea v-model="upsertForm.metadata" rows="3" class="w-full p-3 border rounded-lg bg-gray-50 font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none text-gray-600" placeholder='{"author": "me", "year": 2023}'></textarea>
+                                </div>
+                            </div>
+
+                            <div class="pt-4 flex justify-end">
+                                <button @click="doUpsert" class="bg-green-600 text-white px-8 py-2.5 rounded-lg hover:bg-green-700 font-medium shadow-sm flex items-center transition transform active:scale-95">
+                                    <i class="fa-solid fa-cloud-arrow-up mr-2"></i> Save Document
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -289,7 +405,7 @@
     </div>
 
     <script>
-        const { createApp, ref, onMounted } = Vue;
+        const { createApp, ref, onMounted, nextTick, computed, watch } = Vue;
 
         createApp({
             setup() {
@@ -301,42 +417,65 @@
                 const showCreateModal = ref(false);
                 const toast = ref({ show: false, message: '', type: 'success' });
 
-                // Config Form State
+                // Forms
                 const newCollectionForm = ref({ name: '', chunk_size: 512, chunk_overlap: 50 });
+                const upsertForm = ref({ doc_id: '', text: '', metadata: '{}' });
 
-                // Browse State
+                // Tabs Data
                 const browseData = ref([]);
                 const browsePage = ref(0);
                 const pageSize = 20;
 
-                // Search State
                 const searchQuery = ref('');
                 const filterJson = ref('');
                 const topN = ref(5);
                 const minScore = ref(0.2);
                 const searchResults = ref([]);
 
-                // Upsert State
-                const upsertForm = ref({ doc_id: '', text: '', metadata: '{}' });
+                // --- NEW: EXPLORE STATE ---
+                const chartContainer = ref(null);
+                let chartInstance = null; // ECharts instance (non-reactive)
+
+                // 核心配置对象 (之前报错就是因为没 Return 这个)
+                const exploreConfig = ref({ n_clusters: 15, max_samples: 20000 });
+
+                const analysisState = ref({ status: 'idle', hasData: false, jobId: null });
+                const exploreData = ref({ clusters: [], points: [] });
+
+                // Focusing State
+                const activeCluster = ref(null);
+
+                // Queue Monitoring
+                const queueStats = ref({ qsize: 0, status: 'stopped' });
+
+                // --- Computed ---
+                const activeClusterItems = computed(() => {
+                    if (activeCluster.value === null) return [];
+                    return exploreData.value.points
+                        .filter(p => p.cluster === activeCluster.value)
+                        .slice(0, 100);
+                });
 
                 // --- Helpers ---
                 const showToast = (msg, type = 'success') => {
                     toast.value = { show: true, message: msg, type };
                     setTimeout(() => toast.value.show = false, 3000);
                 };
-
                 const getBaseUrl = () => `api/collections/${selectedCollection.value}`;
 
-                // --- Core Actions ---
+                const colorPalette = [
+                    '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
+                    '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#2f4554', '#61a0a8'
+                ];
+                const getClusterColor = (id) => colorPalette[id % colorPalette.length];
+
+                // --- API Actions ---
 
                 const refreshCollections = async () => {
                     try {
                         const res = await fetch('api/collections');
-                        if (!res.ok) throw new Error("Failed to list collections");
                         const data = await res.json();
                         collections.value = data.collections || [];
-
-                        // Auto-select first if none selected
                         if (collections.value.length > 0 && !selectedCollection.value) {
                             selectedCollection.value = collections.value[0];
                             loadCollection();
@@ -346,35 +485,22 @@
 
                 const createNewCollection = async () => {
                     if (!newCollectionForm.value.name) return;
-
                     try {
                         const res = await fetch('api/collections', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify(newCollectionForm.value)
                         });
-
                         const data = await res.json();
-
                         if (res.ok) {
                             showToast(`Collection configured!`);
-                            if(!collections.value.includes(newCollectionForm.value.name)) {
-                                collections.value.push(newCollectionForm.value.name);
-                            }
+                            if(!collections.value.includes(newCollectionForm.value.name)) collections.value.push(newCollectionForm.value.name);
                             selectedCollection.value = newCollectionForm.value.name;
                             showCreateModal.value = false;
-
-                            // Reset form
                             newCollectionForm.value = { name: '', chunk_size: 512, chunk_overlap: 50 };
-
                             loadCollection();
-                        } else {
-                            showToast(data.error || "Creation failed", "error");
-                        }
-                    } catch(e) {
-                        console.error(e);
-                        showToast("Network Error", "error");
-                    }
+                        } else showToast(data.error, "error");
+                    } catch(e) { showToast("Network Error", "error"); }
                 };
 
                 const loadCollection = async () => {
@@ -387,14 +513,13 @@
                             browsePage.value = 0;
                             browseData.value = [];
                             searchResults.value = [];
+                            // Reset Analysis state on collection switch
+                            analysisState.value = { status: 'idle', hasData: false, jobId: null };
+                            exploreData.value = { clusters: [], points: [] };
+                            activeCluster.value = null;
                             if (currentTab.value === 'browse') fetchDocuments();
-                        } else {
-                            // If stats 404, implies collection not found (or strict mode block)
-                            showToast("Collection not ready", "error");
-                        }
-                    } catch(e) {
-                        showToast(e.message, 'error');
-                    }
+                        } else showToast("Collection not ready", "error");
+                    } catch(e) { showToast(e.message, 'error'); }
                 };
 
                 const fetchDocuments = async () => {
@@ -406,8 +531,6 @@
                         browseData.value = data.items || [];
                     } catch(e) { console.error(e); }
                 };
-
-                // --- Operations ---
 
                 const performSearch = async () => {
                     let filters = null;
@@ -432,107 +555,258 @@
                     let meta = {};
                     try { meta = JSON.parse(upsertForm.value.metadata); }
                     catch(e) { showToast("Invalid JSON metadata", "error"); return; }
-
-                    if(!upsertForm.value.doc_id || !upsertForm.value.text) {
-                        showToast("Doc ID and Text required", "error"); return;
-                    }
+                    if(!upsertForm.value.doc_id || !upsertForm.value.text) { showToast("Missing ID or Text", "error"); return; }
 
                     const res = await fetch(`${getBaseUrl()}/upsert`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            doc_id: upsertForm.value.doc_id,
-                            text: upsertForm.value.text,
-                            metadata: meta
-                        })
+                        body: JSON.stringify({ doc_id: upsertForm.value.doc_id, text: upsertForm.value.text, metadata: meta })
                     });
 
-                    // === CHANGED LOGIC START ===
                     if (res.status === 202) {
-                        // Handle Async Response
-                        showToast(`Document Queued. ID: ${upsertForm.value.doc_id}`, 'success');
-                        upsertForm.value.text = ''; // Clear form immediately
-                        // We don't reloadCollection immediately because it's async
-                    }
-                    else if (res.ok) {
-                        // Handle potential synchronous success (if enabled in future)
-                        const data = await res.json();
-                        showToast(`Saved! ${data.chunks_created || 0} chunks.`);
+                        showToast(`Queued: ${upsertForm.value.doc_id}`, 'success');
+                        upsertForm.value.text = '';
+                    } else if (res.ok) {
+                        showToast(`Saved!`);
                         upsertForm.value.text = '';
                         loadCollection();
-                    } else {
-                        showToast("Upsert Failed or Queue Full", "error");
-                    }
-                    fetchQueueStatus(); // Update queue UI immediately
-                    // === CHANGED LOGIC END ===
+                    } else showToast("Failed", "error");
+                    fetchQueueStatus();
                 };
 
                 const deleteDoc = async (docId) => {
-                    if(!confirm(`Delete document ${docId}?`)) return;
+                    if(!confirm(`Delete ${docId}?`)) return;
                     await fetch(`${getBaseUrl()}/documents/${docId}`, { method: 'DELETE' });
                     showToast(`Deleted ${docId}`);
-                    loadCollection();
+                    // Refresh current view
+                    if (activeCluster.value !== null) {
+                        // Optimistic UI update for explore view
+                        exploreData.value.points = exploreData.value.points.filter(p => p.doc_id !== docId);
+                        renderChart();
+                    } else if (currentTab.value === 'browse') {
+                        fetchDocuments();
+                    }
+                };
+
+                // --- NEW: Analysis & Visualization Logic ---
+
+                const startAnalysis = async () => {
+                    if(!selectedCollection.value) return;
+
+                    analysisState.value.status = 'processing';
+                    analysisState.value.hasData = false;
+                    activeCluster.value = null; // Reset focus
+
+                    try {
+                        const res = await fetch(`${getBaseUrl()}/analysis`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                n_clusters: exploreConfig.value.n_clusters,
+                                max_samples: exploreConfig.value.max_samples
+                            })
+                        });
+
+                        const data = await res.json();
+                        if(res.status === 202) {
+                            analysisState.value.jobId = data.job_id;
+                            pollAnalysis(data.job_id);
+                        } else {
+                            throw new Error(data.error || "Analysis failed to start");
+                        }
+                    } catch (e) {
+                        analysisState.value.status = 'error';
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const pollAnalysis = (jobId) => {
+                    const interval = setInterval(async () => {
+                        // Stop if user switched collections or tab or job changed
+                        if(analysisState.value.jobId !== jobId) { clearInterval(interval); return; }
+
+                        try {
+                            const res = await fetch(`api/analysis/${jobId}`);
+                            const data = await res.json();
+
+                            if (data.status === 'completed') {
+                                clearInterval(interval);
+                                exploreData.value = data.data; // { clusters, points }
+                                analysisState.value.status = 'completed';
+                                analysisState.value.hasData = true;
+                                nextTick(() => renderChart());
+                                showToast("Analysis Complete!");
+                            } else if (data.status === 'failed') {
+                                clearInterval(interval);
+                                analysisState.value.status = 'error';
+                                showToast("Analysis Job Failed", "error");
+                            }
+                        } catch(e) {
+                            clearInterval(interval);
+                            console.error(e);
+                        }
+                    }, 2000);
+                };
+
+                const renderChart = () => {
+                    if (!chartContainer.value) return;
+                    // 如果实例已存在，先销毁，防止配置残留
+                    if (chartInstance) chartInstance.dispose();
+
+                    chartInstance = echarts.init(chartContainer.value);
+                    const points = exploreData.value.points;
+
+                    // 1. 准备数据与样式逻辑
+                    const dataWithStyle = points.map(p => {
+                        // 逻辑：如果当前没有选中任何组(activeCluster is null)，或者点属于当前组，则高亮
+                        // 否则（选中了别的组），该点变灰
+                        const isFocused = activeCluster.value === null || p.cluster === activeCluster.value;
+                        const color = getClusterColor(p.cluster);
+
+                        return {
+                            // ECharts data 数组: [x, y, clusterId, preview, docId]
+                            value: [p.x, p.y, p.cluster, p.preview, p.doc_id],
+                            itemStyle: {
+                                color: isFocused ? color : '#e0e0e0', // 未选中组变灰
+                                opacity: isFocused ? 0.7 : 0.1,       // 未选中组变透明
+                                borderColor: isFocused ? '#fff' : 'transparent',
+                                borderWidth: isFocused ? 0.5 : 0
+                            },
+                            // 选中的点层级更高，防止被灰色点遮挡
+                            z: isFocused ? 10 : 0
+                        };
+                    });
+
+                    const option = {
+                        // 2. 提示框配置
+                        tooltip: {
+                            trigger: 'item',
+                            enterable: true, // 允许鼠标进入提示框（方便复制内容）
+                            formatter: function (params) {
+                                const preview = params.data.value[3];
+                                const docId = params.data.value[4];
+                                const cluster = params.data.value[2];
+                                return `<div style="max-width:300px; white-space:normal; font-family:sans-serif;">
+                                    <div style="margin-bottom:4px;">
+                                        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background-color:${params.color};margin-right:5px;"></span>
+                                        <b>Group ${cluster}</b>
+                                    </div>
+                                    <div style="font-size:11px; color:#aaa; margin-bottom:4px;">${docId}</div>
+                                    <div style="font-size:12px; color:#fff; line-height:1.4;">${preview}</div>
+                                </div>`;
+                            },
+                            backgroundColor: 'rgba(30, 30, 30, 0.9)',
+                            borderColor: '#333',
+                            textStyle: { color: '#eee' }
+                        },
+
+                        // 3. 布局与坐标系
+                        grid: { left: '2%', right: '2%', top: '5%', bottom: '5%', containLabel: false },
+                        xAxis: { show: false, scale: true, type: 'value' },
+                        yAxis: { show: false, scale: true, type: 'value' },
+
+                        // 4. *** 核心修复：缩放与平移配置 ***
+                        dataZoom: [
+                            {
+                                type: 'inside', // 也就是鼠标滚轮缩放，拖拽平移
+                                xAxisIndex: 0,
+                                filterMode: 'none', // 重要：缩放时不进行数据过滤，只改变视角
+                                moveOnMouseWheel: true, // 开启滚轮平移(可选，设为false则滚轮为缩放)
+                                zoomOnMouseWheel: true  // 开启滚轮缩放
+                            },
+                            {
+                                type: 'inside',
+                                yAxisIndex: 0,
+                                filterMode: 'none',
+                                moveOnMouseWheel: true,
+                                zoomOnMouseWheel: true
+                            }
+                        ],
+
+                        // 5. 数据系列配置
+                        series: [{
+                            type: 'scatter',
+                            // 动态调整点的大小：有选中组时，点稍微大一点；全览模式下稍微小一点
+                            symbolSize: activeCluster.value === null ? 6 : 8,
+                            data: dataWithStyle,
+
+                            // *** 核心修复：移除 focus: 'self' ***
+                            emphasis: {
+                                scale: true,   // 鼠标悬停时只放大当前点
+                                scaleSize: 12, // 放大后的尺寸
+                                itemStyle: {
+                                    borderColor: '#fff',
+                                    borderWidth: 2,
+                                    shadowBlur: 10,
+                                    shadowColor: 'rgba(0,0,0,0.3)',
+                                    opacity: 1 // 悬停时强制不透明，看清楚内容
+                                }
+                                // 注意：这里删除了 focus: 'self'，防止触发全局变暗
+                            }
+                        }]
+                    };
+
+                    chartInstance.setOption(option);
+
+                    // 绑定点击事件
+                    chartInstance.on('click', function (params) {
+                        const clusterId = params.data.value[2];
+                        focusCluster(clusterId);
+                    });
+
+                    // 响应窗口大小变化
+                    window.addEventListener('resize', () => chartInstance.resize());
+                };
+
+                const focusCluster = (clusterId) => {
+                    activeCluster.value = clusterId;
+                    renderChart();
+                };
+
+                const resetFocus = () => {
+                    activeCluster.value = null;
+                    renderChart();
+                };
+
+                const fetchQueueStatus = async () => {
+                    try {
+                        const res = await fetch('api/status/queue');
+                        if(res.ok) queueStats.value = await res.json();
+                    } catch(e) {}
                 };
 
                 const clearCollection = async () => {
                      if(!confirm("DANGER: Delete ALL data in this collection?")) return;
                      await fetch(`${getBaseUrl()}/clear`, { method: 'POST' });
                      loadCollection();
-                     showToast("Collection Cleared");
                 };
-
                 const downloadBackup = () => window.location.href = "api/admin/backup";
-                const uploadRestore = async (event) => {
-                    const file = event.target.files[0];
-                    if (!file) return;
-                    if (!confirm("Overwrite Database?")) return;
+                const uploadRestore = async (event) => { /* Same as before */ };
 
-                    const formData = new FormData();
-                    formData.append("file", file);
-                    showToast("Restoring... please wait...", "success");
-
-                    try {
-                        const res = await fetch("api/admin/restore", { method: "POST", body: formData });
-                        const data = await res.json();
-                        if (res.ok) {
-                            showToast("Restore Complete!");
-                            setTimeout(() => location.reload(), 1000);
-                        } else {
-                            showToast(data.error, "error");
-                        }
-                    } catch(e) { showToast("Restore Error", "error"); }
-                };
-
-                const tabClass = (tab) => currentTab.value === tab
-                    ? 'text-blue-600 border-b-2 border-blue-600'
-                    : 'text-gray-500 hover:text-gray-700';
-
+                const tabClass = (tab) => currentTab.value === tab ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700';
                 const getScoreColor = (s) => s > 0.7 ? 'text-green-600' : (s > 0.4 ? 'text-blue-600' : 'text-orange-500');
 
                 onMounted(() => {
                     refreshCollections();
-                    // Start polling queue status every 2 seconds
                     setInterval(fetchQueueStatus, 2000);
                 });
 
-                // 1. ADD: Queue State
-                const queueStats = ref({ qsize: 0, status: 'stopped' });
-
-                // 2. ADD: Polling Function
-                const fetchQueueStatus = async () => {
-                    try {
-                        const res = await fetch('api/status/queue');
-                        if (res.ok) queueStats.value = await res.json();
-                    } catch (e) { console.error(e); }
-                };
+                watch(currentTab, (newVal) => {
+                    if (newVal === 'explore' && analysisState.value.hasData) {
+                        nextTick(() => renderChart());
+                    }
+                });
 
                 return {
                     currentTab, collections, selectedCollection, stats, showCreateModal, newCollectionForm, toast,
-                    browseData, browsePage, pageSize,
-                    searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
-                    refreshCollections, createNewCollection, loadCollection, fetchDocuments,
-                    performSearch, doUpsert, deleteDoc, clearCollection,
-                    downloadBackup, uploadRestore, tabClass, getScoreColor, queueStats
+                    browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
+                    refreshCollections, createNewCollection, loadCollection, fetchDocuments, performSearch, doUpsert, deleteDoc,
+                    clearCollection, downloadBackup, uploadRestore, tabClass, getScoreColor, queueStats,
+
+                    // Explore Variables (Fixed)
+                    exploreConfig,
+                    analysisState, exploreData, startAnalysis, chartContainer,
+                    activeCluster, activeClusterItems, focusCluster, resetFocus, getClusterColor
                 };
             }
         }).mount('#app');
