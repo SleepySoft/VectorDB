@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import shutil
 import datetime
@@ -6,9 +7,14 @@ import logging
 import threading
 import queue
 import time
+import numpy as np
 from typing import List, Dict, Any, Union, Optional
+from chromadb import Settings
+
 
 logger = logging.getLogger(__name__)
+
+os.environ['CHROMA_OTEL_ENABLED'] = 'False'
 
 
 # Note: Heavy imports (chromadb, sentence_transformers) are delayed inside methods
@@ -71,7 +77,10 @@ class VectorStorageEngine:
             from sentence_transformers import SentenceTransformer
 
             logger.info(f"Loading ChromaDB from {self._db_path}...")
-            self._client = chromadb.PersistentClient(path=self._db_path)
+            self._client = chromadb.PersistentClient(
+                path=self._db_path,
+                settings=Settings(anonymized_telemetry=False)
+            )
 
             logger.info(f"Loading Model {self._model_name}...")
             # device='cpu' is default, can be 'cuda' if GPU available
@@ -448,6 +457,18 @@ class VectorCollectionRepo:
         except Exception:
             pass
 
+        clean_metadata = {}
+        for k, v in metadata.items():
+            if isinstance(v, (list, dict)):
+                # 如果是列表或字典，自动转 JSON 字符串
+                clean_metadata[k] = json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, (str, int, float, bool)):
+                # 基础类型直接存
+                clean_metadata[k] = v
+            else:
+                # 其他类型（如 None）强制转字符串或丢弃
+                clean_metadata[k] = str(v)
+
         # 2. Split
         chunks = self._text_splitter.split_text(text)
         if not chunks: return []
@@ -457,7 +478,7 @@ class VectorCollectionRepo:
         chunk_metadatas = []
         for i in range(len(chunks)):
             meta = {"original_doc_id": doc_id, "chunk_index": i, "total_chunks": len(chunks)}
-            meta.update(metadata)
+            meta.update(clean_metadata)
             chunk_metadatas.append(meta)
 
         # 4. Vectorize (Optimized with batching)
@@ -628,61 +649,105 @@ class VectorCollectionRepo:
             "offset": offset
         }
 
-    def analyze_clusters(self, n_clusters: int = 20, max_samples: int = 50000) -> Dict[str, Any]:
+    def _extract_features(self, metadatas: List[Dict], weights: Dict[str, float]) -> np.ndarray:
         """
-        执行轻量级聚类分析和降维，用于生成“浏览视图”。
-
-        策略：
-        1. 使用 batch 方式从 DB 拉取向量 (避免 OOM)。
-        2. 使用 PCA (降维) + MiniBatchKMeans (聚类) 以保证速度和低内存占用。
-        3. 仅在内存中计算，不回写 DB，确保不锁定数据库写入。
-
-        Args:
-            n_clusters: 期望聚合成多少个主题 (如 20 个)。
-            max_samples: 即使有几十万数据，为了速度，通常采样 5w 条足以描绘分布形状。
-                         设为 None 则分析全量数据。
-
-        Returns:
-            Dict: 包含聚类中心、每个点的坐标(x,y)、所属簇、以及代表性文本。
+        Helper: Convert metadata into normalized numerical features.
         """
-        try:
-            import numpy as np
-            from sklearn.cluster import MiniBatchKMeans
-            from sklearn.decomposition import PCA
-        except ImportError:
-            raise ImportError("Clustering requires: pip install scikit-learn numpy")
+        import numpy as np
+        from sklearn.preprocessing import MinMaxScaler
 
-        # 1. 获取数据总数
-        total_count = self.count()
-        if total_count == 0:
-            return {"error": "Collection is empty"}
+        # 1. Temporal Feature
+        times = np.array([m.get("timestamp", 0) for m in metadatas]).reshape(-1, 1)
 
-        # 确定采样步长 (如果数据量极大，进行均匀采样)
-        step = 1
-        limit = total_count
-        if max_samples and total_count > max_samples:
-            limit = max_samples
-            # 这里的采样通过 limit 实现，chroma 目前不支持随机采样，
-            # 生产环境通常取最近的 N 条，或者分段取。这里简单取前 N 条。
+        # 2. Entity Density Feature (Combined count of entities)
+        ents = np.array([
+            len(m.get("person_list", [])) +
+            len(m.get("org_list", [])) +
+            len(m.get("loc_list", []))
+            for m in metadatas
+        ]).reshape(-1, 1)
 
-        print(f"[Analysis] Fetching {limit} embeddings from Chroma...")
+        # Scale to [0, 1]
+        scaler = MinMaxScaler()
+        norm_times = scaler.fit_transform(times) * weights.get("time", 0.2)
+        norm_ents = scaler.fit_transform(ents) * weights.get("entities", 0.5)
 
-        # 2. 批量拉取数据 (Batch Fetching)
-        # Chroma 的 get 方法如果一次拉取太大可能会崩，建议分批
+        return np.hstack([norm_times, norm_ents])
+
+    def _aggregate_to_articles(self, results: Dict, weights: Dict[str, float]):
+        """
+        Helper: Group chunks by original_doc_id and combine their vectors.
+        """
+        import numpy as np
+        doc_groups = {}
+
+        for i in range(len(results['ids'])):
+            meta = results['metadatas'][i]
+            d_id = meta.get("original_doc_id", "unknown")
+
+            if d_id not in doc_groups:
+                doc_groups[d_id] = {
+                    "embeddings": [],
+                    "metadata": meta,
+                    "text": results['documents'][i][:150]
+                }
+            doc_groups[d_id]["embeddings"].append(results['embeddings'][i])
+
+        article_ids = list(doc_groups.keys())
+
+        # Calculate mean embeddings and normalize
+        semantic_vecs = []
+        for d_id in article_ids:
+            avg_emb = np.mean(doc_groups[d_id]["embeddings"], axis=0)
+            avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-9)
+            semantic_vecs.append(avg_emb * weights.get("semantic", 1.0))
+
+        # Extract metadata features
+        meta_features = self._extract_features(
+            [doc_groups[d_id]["metadata"] for d_id in article_ids],
+            weights
+        )
+
+        # Final combined matrix: [Semantic (1024) + Meta Features (N)]
+        X = np.hstack([np.array(semantic_vecs), meta_features])
+        previews = [doc_groups[d_id]["text"] for d_id in article_ids]
+
+        return X, article_ids, previews
+
+    def analyze_clusters(self, n_clusters: int = 20, max_samples: int = 50000,
+                         config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Main Orchestrator for Analysis.
+        config example: {"weights": {"semantic": 1.0, "time": 0.5}, "use_pca": True}
+        """
+        import numpy as np
+        from sklearn.cluster import MiniBatchKMeans
+        from sklearn.decomposition import PCA
+        import time  # 确保导入time
+
+        config = config or {"weights": {"semantic": 1.0, "time": 0.2, "entities": 0.5}}
+        weights = config.get("weights")
+
+        # --- 1. Data Retrieval (Batch Fetching for Memory Safety) ---
+        # 即使只采样 5w 条，一次性 load进内存也很大，建议分批读
         BATCH_SIZE = 5000
-        all_embeddings = []
-        all_metadatas = []
-        all_ids = []
-        all_documents = []  # 只取前几十个字符预览
+        total_in_db = self.count()
+        target_limit = min(total_in_db, max_samples)
 
-        processed = 0
-        while processed < limit:
-            # 计算本次拉取数量
-            current_limit = min(BATCH_SIZE, limit - processed)
+        # 临时存储容器
+        accumulated_ids = []
+        accumulated_embeddings = []
+        accumulated_metadatas = []
+        accumulated_docs = []
 
-            # 仅读取，SQLite 允许并发读，不影响 Engine 的写入线程
+        processed = 0  # <--- [FIX] 初始化变量
+
+        while processed < target_limit:
+            fetch_size = min(BATCH_SIZE, target_limit - processed)
+
+            # ChromaDB get
             results = self._collection.get(
-                limit=current_limit,
+                limit=fetch_size,
                 offset=processed,
                 include=['embeddings', 'metadatas', 'documents']
             )
@@ -690,87 +755,77 @@ class VectorCollectionRepo:
             if not results['ids']:
                 break
 
-            embeddings_batch = results['embeddings']
+            accumulated_ids.extend(results['ids'])
+            accumulated_embeddings.extend(results['embeddings'])
+            accumulated_metadatas.extend(results['metadatas'])
+            accumulated_docs.extend(results['documents'])
 
-            # 简单检查数据完整性
-            if embeddings_batch is None:
-                processed += current_limit
-                continue
+            processed += len(results['ids'])  # <--- [FIX] 累加计数
 
-            all_embeddings.extend(embeddings_batch)
-            all_metadatas.extend(results['metadatas'])
-            all_ids.extend(results['ids'])
-            # 截取文档前 100 个字符用于预览，节省内存
-            all_documents.extend([doc[:100] for doc in results['documents']])
-
-            processed += len(results['ids'])
-            # 简单让出 CPU 时间片，避免占满资源
+            # 简单的防卡死 sleep，让出 GIL
             time.sleep(0.01)
 
-        # 转换为 Numpy 数组
-        X = np.array(all_embeddings)
-        print(f"[Analysis] Data loaded. Shape: {X.shape}")
+        if not accumulated_ids:
+            return {"error": "No data found"}
 
-        # 3. 降维 (用于 2D 可视化) - PCA 极快
-        # 如果追求更漂亮的分布图，可用 UMAP，但几十万数据 UMAP 会很慢
-        print("[Analysis] Running PCA (Reduction to 2D)...")
+        # 构造符合 _aggregate_to_articles 接口的数据结构
+        raw_data = {
+            'ids': accumulated_ids,
+            'embeddings': accumulated_embeddings,
+            'metadatas': accumulated_metadatas,
+            'documents': accumulated_docs
+        }
+
+        # --- 2. Aggregation & Feature Fusion ---
+        X, article_ids, previews = self._aggregate_to_articles(raw_data, weights)
+
+        # --- 3. Dimensionality Reduction (For visualization) ---
         pca = PCA(n_components=2)
-        coords = pca.fit_transform(X)  # 结果是 [[x1, y1], [x2, y2]...]
+        coords = pca.fit_transform(X)
 
-        # 4. 聚类 - MiniBatchKMeans 速度快
-        print(f"[Analysis] Running MiniBatchKMeans (k={n_clusters})...")
-        kmeans = MiniBatchKMeans(
-            n_clusters=n_clusters,
-            random_state=42,
-            batch_size=1024,
-            n_init="auto"
-        )
+        # --- 4. Clustering ---
+        actual_n_clusters = min(n_clusters, len(article_ids))
+        if actual_n_clusters < 2:
+            # 如果只有1篇文章，无法聚类，直接返回
+            return {"error": "Not enough data to cluster"}
+
+        kmeans = MiniBatchKMeans(n_clusters=actual_n_clusters, n_init="auto", batch_size=1024)
         labels = kmeans.fit_predict(X)
 
-        # 5. 生成结果快照
-        # 我们需要找到每个簇的“中心点”代表文档，用来给这个簇起名字
-        cluster_summaries = {}
-
-        # 计算每个点到其簇中心的距离
-        # transform 返回每个点到所有中心的距离，我们取对应 label 的那个距离
+        # --- 5. Result Generation ---
         dist_matrix = kmeans.transform(X)
-
         points_data = []
+        # 初始化中心代表文档容器
+        cluster_reps = {i: {"dist": float('inf'), "text": ""} for i in range(actual_n_clusters)}
 
-        # 预处理：按簇分组，找到距离中心最近的文档
-        min_dist_per_cluster = {i: float('inf') for i in range(n_clusters)}
-        representative_doc_per_cluster = {i: "Unknown Topic" for i in range(n_clusters)}
+        for i in range(len(article_ids)):
+            c_id = int(labels[i])
+            dist = dist_matrix[i][c_id]
 
-        for i in range(len(all_ids)):
-            cluster_id = int(labels[i])
-            dist = dist_matrix[i][cluster_id]
-
-            # 记录数据点供前端绘图
             points_data.append({
-                "id": all_ids[i],
-                "x": round(float(coords[i][0]), 4),  # 保留4位小数减小JSON体积
+                "id": article_ids[i],
+                "x": round(float(coords[i][0]), 4),
                 "y": round(float(coords[i][1]), 4),
-                "cluster": cluster_id,
-                "preview": all_documents[i],
-                "doc_id": all_metadatas[i].get("original_doc_id", "unknown")
+                "cluster": c_id,
+                "preview": previews[i],
+                "doc_id": article_ids[i]
             })
 
-            # 更新该簇的代表性文档（离中心最近的点）
-            if dist < min_dist_per_cluster[cluster_id]:
-                min_dist_per_cluster[cluster_id] = dist
-                representative_doc_per_cluster[cluster_id] = all_documents[i]
+            # 寻找离中心最近的点作为 Topic Preview
+            if dist < cluster_reps[c_id]["dist"]:
+                cluster_reps[c_id] = {"dist": dist, "text": previews[i]}
 
-        # 汇总簇信息
-        clusters_info = []
-        for i in range(n_clusters):
-            clusters_info.append({
+        clusters_info = [
+            {
                 "cluster_id": i,
-                "topic_preview": representative_doc_per_cluster[i],  # 前端可以用这个发给 LLM 总结标题
+                "topic_preview": cluster_reps[i]["text"],
                 "count": int(np.sum(labels == i))
-            })
+            } for i in range(actual_n_clusters)
+        ]
 
         return {
-            "total_analyzed": len(all_ids),
+            "total_articles": len(article_ids),
+            "total_chunks_scanned": processed,  # <--- [FIX] 现在引用是安全的
             "clusters": clusters_info,
-            "points": points_data  # 前端用 scatter plot 渲染这个
+            "points": points_data
         }

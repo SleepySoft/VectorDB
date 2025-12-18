@@ -20,6 +20,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# DEFAULT_MODEL = 'BAAI/bge-m3'
+DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+
 class VectorDBService:
     """
     VectorDBService: The Web API Layer.
@@ -515,8 +519,8 @@ if __name__ == "__main__":
 
     # 3. Model Config
     parser.add_argument("--model", type=str,
-                        default=os.getenv("VECTOR_MODEL", "all-MiniLM-L6-v2"),
-                        help="SentenceTransformer model name (default: all-MiniLM-L6-v2 or env VECTOR_MODEL)")
+                        default=os.getenv("VECTOR_MODEL", DEFAULT_MODEL),
+                        help=f"SentenceTransformer model name (default: {DEFAULT_MODEL} or env VECTOR_MODEL)")
 
     args = parser.parse_args()
 
