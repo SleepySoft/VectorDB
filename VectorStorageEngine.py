@@ -58,7 +58,7 @@ class VectorStorageEngine:
         self._repos = {}
 
         # --- Async Task Queue Setup ---
-        self._queue = queue.Queue(maxsize=100)  # Limit queue to prevent OOM on backlog
+        self._queue = queue.Queue(maxsize=1000)  # Limit queue to prevent OOM on backlog
         self._worker_thread = None
         self._stop_worker = threading.Event()
 
