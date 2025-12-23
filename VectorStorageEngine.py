@@ -66,7 +66,7 @@ class VectorStorageEngine:
         self._repos = {}
 
         # --- Async Task Queue Setup ---
-        self._queue = queue.Queue(maxsize=1000)  # Limit queue to prevent OOM on backlog
+        self._queue = queue.Queue(maxsize=100)  # Limit queue to prevent OOM on backlog
         self._worker_thread = None
         self._stop_worker = threading.Event()
 
@@ -81,6 +81,7 @@ class VectorStorageEngine:
         try:
             logger.info("Importing heavy libraries...")
             # Lazy imports
+            import torch
             import chromadb
             from sentence_transformers import SentenceTransformer
 
@@ -91,8 +92,9 @@ class VectorStorageEngine:
             )
 
             logger.info(f"Loading Model {self._model_name}...")
-            # device='cpu' is default, can be 'cuda' if GPU available
-            self._model = SentenceTransformer(self._model_name)
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self._model = SentenceTransformer(self._model_name, device=device)
+            logger.info(f"Model loaded on device: {device}")
 
             # Mark as Ready
             with self._lock:
