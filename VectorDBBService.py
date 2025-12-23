@@ -446,9 +446,7 @@ class VectorDBService:
             for jid in expired_jobs:
                 del self._analysis_jobs[jid]
 
-            # 1. 检查 Engine 状态
-            if not self.engine.is_ready():
-                return jsonify({"error": "Engine is initializing"}), 503
+            get_repo_strict(name)  # Call this function to check the engine and repository status in a unified way.
 
             # 2. 解析参数
             data = request.json or {}

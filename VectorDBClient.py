@@ -97,12 +97,13 @@ class CircuitBreaker:
         }
 
 
-def retry_with_timeout(default_timeout: float = 60.0):
+def retry_with_timeout(default_timeout: float = 60.0, max_retries: int = -1):
     """
     Decorator that retries the function until success or until 'timeout' expires.
 
     Args:
         default_timeout: The default total time (in seconds) allowed for the operation.
+        max_retries: The max retries. -1 means retry forever.
     """
 
     def decorator(func):
@@ -119,7 +120,7 @@ def retry_with_timeout(default_timeout: float = 60.0):
 
             last_error = None
 
-            while True:
+            while (max_retries < 0) or (retries < max_retries):
                 # 2. Check Time Budget
                 elapsed = time.time() - start_time
                 if elapsed > total_timeout:
@@ -238,23 +239,29 @@ class VectorDBClient:
         """
         Enhanced create_collection with circuit breaker and retry limits.
         """
-        url = f"{self.base_url}/api/collections"
-        payload = {
-            "name": name,
-            "chunk_size": chunk_size,
-            "chunk_overlap": chunk_overlap
-        }
+        if not self._circuit_breaker.can_execute():
+            raise ServerBusyError("Circuit breaker is OPEN, rejecting request")
 
-        # Short timeout for individual requests
-        resp = requests.post(url, json=payload, timeout=5)
+        try:
+            url = f"{self.base_url}/api/collections"
+            payload = {
+                "name": name,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap
+            }
 
-        if resp.status_code == 503:
-            # Let _handle_response classify the specific error type
-            collection = RemoteCollection(self.base_url, name)
-            collection._handle_response(resp)  # This will raise appropriate exception
+            # Short timeout for individual requests
+            resp = requests.post(url, json=payload, timeout=5)
 
-        resp.raise_for_status()
-        return RemoteCollection(self.base_url, name)
+            if resp.status_code == 503:
+                self._handle_503_response(resp)
+
+            resp.raise_for_status()
+            return RemoteCollection(self.base_url, name)
+
+        except Exception as e:
+            self._circuit_breaker.on_failure()
+            raise
 
     def get_collection(self, name: str) -> "RemoteCollection":
         """
@@ -268,6 +275,22 @@ class VectorDBClient:
         resp = requests.get(f"{self.base_url}/api/collections")
         resp.raise_for_status()
         return resp.json().get("collections", [])
+
+    def _handle_503_response(self, resp: requests.Response):
+        """专门处理503响应的辅助方法"""
+        try:
+            error_data = resp.json()
+            error_msg = error_data.get("error", "Unknown")
+            error_code = error_data.get("error_code")
+
+            if error_code == "BUSY" or "busy" in error_msg.lower():
+                raise ServerBusyError(f"Server busy: {error_msg}")
+            elif error_code == "INIT" or "initializing" in error_msg.lower():
+                raise ServerInitializingError(f"Server initializing: {error_msg}")
+            else:
+                raise RetryableError(f"Service Unavailable: {error_msg}")
+        except ValueError:
+            raise RetryableError(f"Service Unavailable: {resp.text}")
 
 
 class RemoteCollection:
@@ -289,9 +312,9 @@ class RemoteCollection:
                 error_code = None
 
             # Classify based on error code first, then fallback to string matching
-            if error_code == "SERVER_BUSY":
+            if error_code == "BUSY":
                 raise ServerBusyError(f"Server busy: {error_msg}")
-            elif error_code == "INITIALIZING":
+            elif error_code == "INIT":
                 raise ServerInitializingError(f"Server initializing: {error_msg}")
             elif "initializing" in error_msg.lower():
                 raise ServerInitializingError(f"Server initializing: {error_msg}")
@@ -317,8 +340,12 @@ class RemoteCollection:
         """
         Upserts a document.
         Args:
+            doc_id:
+            text:
+            metadata:
             timeout (float): Total duration (in seconds) to keep retrying if server is busy.
                              If not provided, defaults to 120s.
+            max_retries:
         Returns:
             Dict: {'status': 'queued', 'message': '...', 'doc_id': '...'}
                   The operation is NOT finished when this returns.
