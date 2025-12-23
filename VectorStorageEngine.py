@@ -7,6 +7,8 @@ import shutil
 import datetime
 import logging
 import threading
+from enum import Enum
+
 import numpy as np
 from chromadb import Settings
 from typing import List, Dict, Any, Optional
@@ -22,6 +24,12 @@ os.environ['CHROMA_OTEL_ENABLED'] = 'False'
 # Here we keep them lazy-loaded inside the class to speed up module import.
 
 class VectorStorageEngine:
+
+    class Status(str, Enum):
+        INIT = "initializing"
+        READY = "ready"
+        ERROR = "error"
+
     """
     VectorStorageEngine: The heavy-lifting engine.
 
@@ -45,7 +53,7 @@ class VectorStorageEngine:
         self._db_path = db_path
         self._model_name = model_name
 
-        self._status = "initializing"
+        self._status = VectorStorageEngine.Status.INIT
         self._error_message = None
         self._ready_event = threading.Event()
         self._lock = threading.RLock()
@@ -88,7 +96,7 @@ class VectorStorageEngine:
 
             # Mark as Ready
             with self._lock:
-                self._status = "ready"
+                self._status = VectorStorageEngine.Status.READY
                 self._ready_event.set()
 
             logger.info("VectorStorageEngine is READY.")
@@ -96,7 +104,7 @@ class VectorStorageEngine:
         except Exception as e:
             logger.error(f"FATAL: Engine initialization failed: {e}")
             with self._lock:
-                self._status = "error"
+                self._status = VectorStorageEngine.Status.ERROR
                 self._error_message = str(e)
                 # We do NOT set the ready event, so waiters will timeout or handle status manually
 
@@ -368,7 +376,7 @@ class VectorStorageEngine:
 
             except Exception as e:
                 # If restore fails, the DB might be in a corrupted state.
-                self._status = "error"
+                self._status = VectorStorageEngine.Status.ERROR
                 self._error_message = f"Restore failed: {e}"
                 logger.error(f"FATAL: Restore failed: {e}")
                 raise e

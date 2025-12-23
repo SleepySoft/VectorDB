@@ -4,6 +4,7 @@ import uuid
 import logging
 import argparse
 import tempfile
+from enum import Enum
 from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, request, jsonify, send_file, Response
@@ -25,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 # DEFAULT_MODEL = 'BAAI/bge-m3'
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+
+class ServiceUnavailable(Exception):
+    class Code(str, Enum):
+        INIT = "INIT"
+        BUSY = "BUSY"
+
+    def __init__(self, code: str, reason: str):
+        self.code = code
+        self.reason = reason
 
 
 class VectorDBService:
@@ -53,6 +64,13 @@ class VectorDBService:
 
         self._analysis_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisWorker")
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
+
+        self.metrics = {
+            'service_unavailable_count': 0,
+            'init_errors': 0,
+            'busy_errors': 0,
+            'request_count': 0
+        }
 
         if not os.path.exists(self._frontend_path):
             logger.warning(f"Frontend file not found at: {self._frontend_path}")
@@ -101,15 +119,33 @@ class VectorDBService:
 
             return decorator
 
-        # --- Error Handling ---
-        class ServiceUnavailable(Exception):
-            pass
-
         @bp.errorhandler(ServiceUnavailable)
         def handle_service_unavailable(e):
-            return jsonify({"error": str(e), "status": "initializing"}), 503
+            self.metrics['service_unavailable_count'] += 1
+
+            if e.code == ServiceUnavailable.Code.INIT:
+                self.metrics['init_errors'] += 1
+            elif e.code == ServiceUnavailable.Code.BUSY:
+                self.metrics['busy_errors'] += 1
+
+            if os.environ.get('FLASK_ENV') == 'production':
+                return jsonify({
+                    "error": "Service temporarily unavailable",
+                    "error_code": e.code,
+                    "retry_after": 30,
+                    "status": "unavailable"
+                }), 503
+            else:
+                # 开发环境可以显示详细错误
+                return jsonify({
+                    "error": e.reason,
+                    "error_code": e.code,
+                    "retry_after": 5,
+                    "status": "unavailable"
+                }), 503
 
         # --- Helper Method ---
+
         def get_repo_strict(name: str):
             """
             Retrieves a repository strictly.
@@ -119,12 +155,14 @@ class VectorDBService:
             # 1. Check readiness
             if not self.engine.is_ready():
                 status = self.engine.get_status()
-                if status["status"] == "error":
+                if status["status"] == VectorStorageEngine.Status.INIT:
+                    # 503 Service Unavailable if just loading
+                    raise ServiceUnavailable(ServiceUnavailable.Code.INIT, "Engine is initializing")
+                elif status["status"] == VectorStorageEngine.Status.ERROR:
                     # 500 Internal Server Error if init failed permanently
                     raise Exception(f"Engine failed to start: {status['error']}")
                 else:
-                    # 503 Service Unavailable if just loading
-                    raise ServiceUnavailable("Engine is initializing")
+                    raise Exception(f"Engine got exception: {status['error']}")
 
             # 2. Retrieve Repo
             repo = self.engine.get_repository(name)
@@ -192,22 +230,19 @@ class VectorDBService:
                 if not doc_id or not text:
                     return jsonify({"error": "doc_id and text are required"}), 400
 
-                # Ensure collection logic is mostly strictly checked in worker,
-                # but we can check basic readiness here.
-                if not self.engine.is_ready():
-                    return jsonify({"error": "Engine initializing"}), 503
+                get_repo_strict(name)   # Call this function to check the engine and repository status in a unified way.
 
-                # Submit to Queue
-                success = self.engine.submit_upsert(name, doc_id, text, metadata)
-
-                if success:
+                if self.engine.submit_upsert(name, doc_id, text, metadata):
                     return jsonify({
                         "status": "queued",
                         "message": "Document accepted for processing.",
                         "doc_id": doc_id
                     }), 202
                 else:
-                    return jsonify({"error": "Server busy (queue full)"}), 503
+                    raise ServiceUnavailable(ServiceUnavailable.Code.BUSY, "Server busy (queue full)")
+
+            except ServiceUnavailable as e:
+                raise e
 
             except Exception as e:
                 logger.error(f"Upsert request failed: {e}")
@@ -215,24 +250,34 @@ class VectorDBService:
 
         @route("/api/collections/<name>/upsert_batch", methods=["POST"])
         def upsert_batch(name):
-            data = request.json  # Expecting list of {doc_id, text, metadata}
-            if not isinstance(data, list):
-                return jsonify({"error": "Expected a list"}), 400
+            try:
+                data = request.json  # Expecting list of {doc_id, text, metadata}
+                if not isinstance(data, list):
+                    return jsonify({"error": "Expected a list"}), 400
 
-            # 构建内部任务格式
-            tasks = []
-            for item in data:
-                tasks.append({
-                    "collection_name": name,
-                    "doc_id": item.get("doc_id"),
-                    "text": item.get("text"),
-                    "metadata": item.get("metadata", {})
-                })
+                # 构建内部任务格式
+                tasks = []
+                for item in data:
+                    tasks.append({
+                        "collection_name": name,
+                        "doc_id": item.get("doc_id"),
+                        "text": item.get("text"),
+                        "metadata": item.get("metadata", {})
+                    })
 
-            if self.engine.submit_upsert_batch(tasks):
-                return jsonify({"status": "queued", "count": len(tasks)}), 202
-            else:
-                return jsonify({"error": "Queue full"}), 503
+                get_repo_strict(name)   # Call this function to check the engine and repository status in a unified way.
+
+                if self.engine.submit_upsert_batch(tasks):
+                    return jsonify({"status": "queued", "count": len(tasks)}), 202
+                else:
+                    raise ServiceUnavailable(ServiceUnavailable.Code.BUSY, "Server busy (queue full)")
+
+            except ServiceUnavailable as e:
+                raise e
+
+            except Exception as e:
+                logger.error(f"Upsert batch request failed: {e}")
+                return jsonify({"error": str(e)}), 500
 
         @route("/api/status/queue", methods=["GET"])
         def queue_status():
@@ -247,7 +292,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
+                raise e     # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -277,7 +322,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
+                raise e     # Handled by errorhandler
             except Exception as e:
                 logger.error(f"Search failed: {e}")
                 return jsonify({"error": str(e)}), 500
@@ -294,7 +339,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
+                raise e     # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -307,7 +352,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
+                raise e     # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -386,7 +431,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                return jsonify({"error": "Engine initializing", "retry_after": 5}), 503
+                raise e     # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 

@@ -9,6 +9,31 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 logger = logging.getLogger("VectorDBClient")
 
 
+class RetryableError(RuntimeError):
+    """Base class for retryable errors."""
+    pass
+
+class NonRetryableError(RuntimeError):
+    """Base class for non-retryable errors."""
+    pass
+
+class ServerBusyError(RetryableError):
+    """Server is busy, can be retried."""
+    pass
+
+class ServerInitializingError(RetryableError):
+    """Server is initializing, can be retried."""
+    pass
+
+class AuthenticationError(NonRetryableError):
+    """Authentication failed, should not retry."""
+    pass
+
+class InvalidRequestError(NonRetryableError):
+    """Invalid request, should not retry."""
+    pass
+
+
 class VectorDBInitializationError(Exception):
     pass
 
@@ -16,6 +41,60 @@ class VectorDBInitializationError(Exception):
 class VectorDBTimeoutError(TimeoutError):
     """Raised when the operation exceeds the maximum retry duration."""
     pass
+
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to prevent cascading failures.
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 30.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+
+    def can_execute(self) -> bool:
+        """Check if request can be executed based on current state."""
+        if self.state == "OPEN":
+            # Check if recovery timeout has passed
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF_OPEN"
+                return True
+            return False
+        return True
+
+    def on_success(self):
+        """Handle successful execution."""
+        if self.state == "HALF_OPEN":
+            # Reset on successful execution in half-open state
+            self.state = "CLOSED"
+            self.failure_count = 0
+        elif self.state == "CLOSED":
+            self.failure_count = max(0, self.failure_count - 1)  # Gradual recovery
+
+    def on_failure(self):
+        """Handle failed execution."""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+        elif self.state == "HALF_OPEN":
+            self.state = "OPEN"  # Back to open if half-open attempt fails
+
+    def get_state(self) -> str:
+        """Get current circuit breaker state."""
+        return self.state
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get circuit breaker metrics for monitoring."""
+        return {
+            "state": self.state,
+            "failure_count": self.failure_count,
+            "last_failure_time": self.last_failure_time
+        }
 
 
 def retry_with_timeout(default_timeout: float = 60.0):
@@ -94,6 +173,7 @@ class VectorDBClient:
 
     def __init__(self, base_url: str = "http://localhost:8001"):
         self.base_url = base_url.rstrip("/")
+        self._circuit_breaker = CircuitBreaker()  # Instance-level circuit breaker
 
     def get_status(self) -> Dict[str, Any]:
         """Check the raw status of the server."""
@@ -143,13 +223,20 @@ class VectorDBClient:
 
             time.sleep(poll_interval)
 
-    # Allow user to specify how long they are willing to wait for creation
-    @retry_with_timeout(default_timeout=60.0)
-    def create_collection(self, name: str, chunk_size: int = 512, chunk_overlap: int = 50,
-                          **kwargs) -> "RemoteCollection":
+    def get_circuit_breaker_status(self) -> Dict[str, Any]:
+        """Get circuit breaker status for monitoring."""
+        return self._circuit_breaker.get_metrics()
+
+    def reset_circuit_breaker(self):
+        """Manually reset circuit breaker (for testing/recovery)."""
+        self._circuit_breaker = CircuitBreaker()
+        logger.info("Circuit breaker manually reset")
+
+    @retry_with_timeout(default_timeout=60.0, max_retries=10)
+    def create_collection(self, name: str, chunk_size: int = 512,
+                          chunk_overlap: int = 50, **kwargs) -> "RemoteCollection":
         """
-        Args:
-            timeout (float): Max time to wait for success. Default 60s.
+        Enhanced create_collection with circuit breaker and retry limits.
         """
         url = f"{self.base_url}/api/collections"
         payload = {
@@ -157,11 +244,14 @@ class VectorDBClient:
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap
         }
-        # Use a short request timeout so we fail fast and let the loop handle retries
+
+        # Short timeout for individual requests
         resp = requests.post(url, json=payload, timeout=5)
 
         if resp.status_code == 503:
-            raise RuntimeError("VectorDB Service Unavailable (Initializing or Busy).")
+            # Let _handle_response classify the specific error type
+            collection = RemoteCollection(self.base_url, name)
+            collection._handle_response(resp)  # This will raise appropriate exception
 
         resp.raise_for_status()
         return RemoteCollection(self.base_url, name)
@@ -186,22 +276,36 @@ class RemoteCollection:
         self.name = name
 
     def _handle_response(self, resp: requests.Response) -> Any:
-        # Same logic as before to detect 503 Busy
+        """
+        Enhanced error classification with specific exception types.
+        """
         if resp.status_code == 503:
             try:
-                error_msg = resp.json().get("error", "Unknown")
+                error_data = resp.json()
+                error_msg = error_data.get("error", "Unknown")
+                error_code = error_data.get("error_code")  # Server should provide error codes
             except:
                 error_msg = "Service Unavailable"
+                error_code = None
 
-            if "initializing" in error_msg.lower():
-                raise RuntimeError(f"Server initializing: {error_msg}")
+            # Classify based on error code first, then fallback to string matching
+            if error_code == "SERVER_BUSY":
+                raise ServerBusyError(f"Server busy: {error_msg}")
+            elif error_code == "INITIALIZING":
+                raise ServerInitializingError(f"Server initializing: {error_msg}")
+            elif "initializing" in error_msg.lower():
+                raise ServerInitializingError(f"Server initializing: {error_msg}")
             elif "queue" in error_msg.lower() or "busy" in error_msg.lower():
-                raise RuntimeError(f"Server busy: {error_msg}")
+                raise ServerBusyError(f"Server busy: {error_msg}")
             else:
-                raise RuntimeError(f"Service Unavailable: {error_msg}")
+                raise RetryableError(f"Service Unavailable: {error_msg}")
 
+        if resp.status_code == 401:
+            raise AuthenticationError("Authentication failed")
+        if resp.status_code == 400:
+            raise InvalidRequestError(f"Invalid request: {resp.text}")
         if resp.status_code == 404:
-            raise ValueError(f"Collection '{self.name}' not found.")
+            raise InvalidRequestError(f"Collection '{self.name}' not found.")
 
         resp.raise_for_status()
         if resp.status_code == 204:
