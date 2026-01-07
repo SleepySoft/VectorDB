@@ -158,7 +158,7 @@ class VectorStorageEngine:
 
         # Perform the heavy lifting
         repo.upsert_document(doc_id, text, metadata)
-        logger.info(f"Async Upsert Completed: {doc_id} in {collection_name}")
+        # logger.info(f"Async Upsert Completed: {doc_id} in {collection_name}")
 
     def submit_upsert(self, collection_name: str, doc_id: str, text: str, metadata: Dict = None) -> bool:
         """
