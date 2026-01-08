@@ -407,3 +407,72 @@ class RemoteCollection:
         resp = requests.post(f"{self.api_url}/clear")
         res = self._handle_response(resp)
         return res.get("status") == "cleared"
+
+    def exists(self, doc_id: str, **kwargs) -> bool:
+        """
+        Check if a single document exists in the collection.
+
+        This method performs a lightweight existence check for a single document.
+        It's more efficient than fetching the entire document when you only need
+        to know if it exists.
+
+        Args:
+            doc_id: Document ID to check
+            **kwargs: Additional arguments including 'timeout' for operation timeout
+
+        Returns:
+            Boolean indicating whether the document exists
+
+        Raises:
+            AuthenticationError: If authentication fails
+            InvalidRequestError: If collection doesn't exist or invalid parameters
+            ServerBusyError: If server is busy (can be retried)
+            ServerInitializingError: If server is still initializing
+            VectorDBTimeoutError: If operation times out
+        """
+        # Use the retry decorator to handle timeouts and retries
+        return self._exists_impl(doc_id, **kwargs)
+
+    @retry_with_timeout(default_timeout=30.0)
+    def _exists_impl(self, doc_id: str, **kwargs) -> bool:
+        """Internal implementation of exists with retry logic."""
+        url = f"{self.api_url}/documents/{doc_id}/exists"
+        resp = requests.get(url, timeout=5)
+        return self._handle_response(resp).get("exists", False)
+
+    def exists_batch(self, doc_ids: List[str], **kwargs) -> Dict[str, bool]:
+        """
+        Batch check existence of multiple documents in the collection.
+
+        This method is more efficient than checking documents one by one when
+        you need to verify the existence of multiple documents. It returns a
+        dictionary mapping each document ID to its existence status.
+
+        Args:
+            doc_ids: List of document IDs to check
+            **kwargs: Additional arguments including 'timeout' for operation timeout
+
+        Returns:
+            Dictionary mapping document IDs to boolean existence status
+
+        Raises:
+            AuthenticationError: If authentication fails
+            InvalidRequestError: If collection doesn't exist or invalid parameters
+            ServerBusyError: If server is busy (can be retried)
+            ServerInitializingError: If server is still initializing
+            VectorDBTimeoutError: If operation times out
+
+        Example:
+            >> collection.exists_batch(["doc1", "doc2", "doc3"])
+            {"doc1": True, "doc2": False, "doc3": True}
+        """
+        # Use the retry decorator to handle timeouts and retries
+        return self._exists_batch_impl(doc_ids, **kwargs)
+
+    @retry_with_timeout(default_timeout=30.0)
+    def _exists_batch_impl(self, doc_ids: List[str], **kwargs) -> Dict[str, bool]:
+        """Internal implementation of exists_batch with retry logic."""
+        url = f"{self.api_url}/exists"
+        payload = {"doc_ids": doc_ids}
+        resp = requests.post(url, json=payload, timeout=5)
+        return self._handle_response(resp).get("exists_map", {})

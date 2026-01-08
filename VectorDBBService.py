@@ -279,6 +279,73 @@ class VectorDBService:
                 logger.error(f"Upsert batch request failed: {e}")
                 return jsonify({"error": str(e)}), 500
 
+        @route("/api/collections/<name>/documents/<doc_id>/exists", methods=["GET"])
+        def check_document_exists(name, doc_id):
+            try:
+                repo = get_repo_strict(name)
+
+                # Use the repo's exists method for single document check
+                exists = repo.exists(doc_id)
+
+                return jsonify({
+                    "collection": name,
+                    "doc_id": doc_id,
+                    "exists": exists
+                })
+
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 404
+            except ServiceUnavailable as e:
+                raise e
+            except Exception as e:
+                logger.error(f"Single document existence check failed: {e}")
+                return jsonify({"error": str(e)}), 500
+
+        @route("/api/collections/<name>/exists", methods=["POST"])
+        def check_documents_exist(name):
+            try:
+                data = request.json or {}
+                doc_ids = data.get("doc_ids", [])
+
+                # Validate input
+                if not doc_ids:
+                    return jsonify({
+                        "error": "doc_ids field is required and cannot be empty"
+                    }), 400
+
+                if not isinstance(doc_ids, list):
+                    return jsonify({
+                        "error": "doc_ids must be a list of document IDs"
+                    }), 400
+
+                # Check for non-string values in the list
+                invalid_ids = [doc_id for doc_id in doc_ids if not isinstance(doc_id, str)]
+                if invalid_ids:
+                    return jsonify({
+                        "error": f"All document IDs must be strings. Invalid IDs: {invalid_ids}"
+                    }), 400
+
+                repo = get_repo_strict(name)
+
+                # Use the repo's exists_batch method for efficient batch checking
+                # Ensure the repo has this method (should be implemented in VectorCollectionRepo)
+                exists_map = repo.exists_batch(doc_ids)
+
+                return jsonify({
+                    "collection": name,
+                    "exists_map": exists_map,
+                    "total_checked": len(doc_ids),
+                    "total_exists": sum(1 for exists in exists_map.values() if exists)
+                })
+
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 404
+            except ServiceUnavailable as e:
+                raise e
+            except Exception as e:
+                logger.error(f"Batch document existence check failed: {e}")
+                return jsonify({"error": str(e)}), 500
+
         @route("/api/status/queue", methods=["GET"])
         def queue_status():
             """New endpoint to monitor queue depth."""

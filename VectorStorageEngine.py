@@ -11,7 +11,7 @@ from enum import Enum
 
 import numpy as np
 from chromadb import Settings
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 
 logger = logging.getLogger(__name__)
@@ -519,6 +519,62 @@ class VectorCollectionRepo:
             return len(result["ids"]) > 0
         except Exception:
             return False
+
+    def exists_batch(self, doc_ids: Union[str, List[str]]) -> Dict[str, bool]:
+        """
+        Check existence of one or multiple documents in the collection.
+
+        This method performs a batch query to check which document IDs exist
+        in the collection. It's more efficient than individual queries when
+        checking multiple IDs.
+
+        Args:
+            doc_ids: Single document ID as string, or list of document IDs.
+
+        Returns:
+            Dictionary mapping document IDs to boolean existence status.
+            Example: {"doc1": True, "doc2": False}
+
+        Raises:
+            ValueError: If doc_ids is empty or not a valid type.
+        """
+        from typing import Union, List, Dict
+
+        # Convert single ID to list for uniform processing
+        if isinstance(doc_ids, str):
+            doc_ids = [doc_ids]
+        elif not isinstance(doc_ids, list) or not doc_ids:
+            raise ValueError("doc_ids must be a non-empty string or list of strings")
+
+        # Early return for empty list (though should be caught above)
+        if not doc_ids:
+            return {}
+
+        # Use ChromaDB's get method with 'in' operator to batch query
+        # $in operator allows checking multiple values for a metadata field
+        try:
+            result = self._collection.get(
+                where={"original_doc_id": {"$in": doc_ids}},
+                limit=len(doc_ids) * 100,  # Large limit to get all chunks
+                include=[],  # We only need existence, not data
+                # Use distinct to get unique document IDs for efficiency
+                # where_document is None because we don't filter by document content
+            )
+        except Exception as e:
+            logger.error(f"Batch existence check failed: {e}")
+            # Fallback: return all False on error
+            return {doc_id: False for doc_id in doc_ids}
+
+        # Extract unique document IDs from the results
+        # We need to check metadata for original_doc_id
+        existing_ids = set()
+        if result.get('metadatas'):
+            for metadata in result['metadatas']:
+                if metadata and 'original_doc_id' in metadata:
+                    existing_ids.add(metadata['original_doc_id'])
+
+        # Build result dictionary
+        return {doc_id: (doc_id in existing_ids) for doc_id in doc_ids}
 
     def delete_document(self, doc_id: str) -> bool:
         """
