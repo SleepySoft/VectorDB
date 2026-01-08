@@ -82,30 +82,6 @@ class VectorDBService:
         Args:
             wrapper (Callable): Optional decorator to wrap all routes (e.g., for auth).
         """
-
-        def run_analysis_task(job_id: str, collection_name: str, n_clusters: int, max_samples: int):
-            """在后台线程中实际执行分析"""
-            try:
-                # 更新状态
-                self._analysis_jobs[job_id]["status"] = "processing"
-
-                # 获取 Repo (这里假设 Engine 已经是 Ready 的，因为提交时检查过)
-                repo = self.engine.get_repository(collection_name)
-                if not repo:
-                    raise ValueError(f"Collection {collection_name} not found")
-
-                # *** 执行核心耗时操作 ***
-                # 注意：max_samples 对于几十万数据非常重要，建议默认限制在 50000 以内
-                result = repo.analyze_clusters(n_clusters=n_clusters, max_samples=max_samples)
-
-                self._analysis_jobs[job_id]["result"] = result
-                self._analysis_jobs[job_id]["status"] = "completed"
-
-            except Exception as e:
-                logger.error(f"Analysis job {job_id} failed: {e}")
-                self._analysis_jobs[job_id]["error"] = str(e)
-                self._analysis_jobs[job_id]["status"] = "failed"
-
         bp = Blueprint("vector_db", __name__, static_folder=None)
 
         # Helper to apply wrapper if it exists
@@ -505,41 +481,133 @@ class VectorDBService:
         @route("/api/collections/<name>/analysis", methods=["POST"])
         def trigger_analysis(name):
             """
-            Step 1: 提交分析任务
+            Submit a clustering analysis job with different clustering methods.
+
+            This endpoint accepts different clustering methods (kmeans, auto_kmeans, dbscan)
+            each with their own parameters. The analysis runs asynchronously in the background.
             """
-            # 清理超过 1 小时的旧任务
+            # Clean up old jobs (older than 1 hour)
             current_time = time.time()
-            expired_jobs = [jid for jid, j in self._analysis_jobs.items() if current_time - j['created_at'] > 3600]
+            expired_jobs = [jid for jid, j in self._analysis_jobs.items()
+                            if current_time - j['created_at'] > 3600]
             for jid in expired_jobs:
                 del self._analysis_jobs[jid]
 
-            get_repo_strict(name)  # Call this function to check the engine and repository status in a unified way.
+            # Check if collection exists
+            get_repo_strict(name)
 
-            # 2. 解析参数
+            # Parse request data
             data = request.json or {}
-            n_clusters = int(data.get("n_clusters", 15))
-            max_samples = data.get("max_samples", 20000)  # 默认限制采样，保护内存
+            method = data.get("method", "kmeans").lower()  # Default to kmeans
+            params = data.get("params", {})
 
-            # 3. 创建 Job ID
+            # Validate method
+            valid_methods = ["kmeans", "auto_kmeans", "dbscan"]
+            if method not in valid_methods:
+                return jsonify({
+                    "error": f"Invalid method '{method}'. Must be one of: {', '.join(valid_methods)}"
+                }), 400
+
+            # Validate and prepare parameters based on method
+            validated_params = {}
+
+            if method == "kmeans":
+                # Required parameters
+                n_clusters = params.get("n_clusters")
+                if n_clusters is None:
+                    return jsonify({
+                        "error": "Parameter 'n_clusters' is required for kmeans method"
+                    }), 400
+                if not isinstance(n_clusters, int) or n_clusters < 2:
+                    return jsonify({
+                        "error": "Parameter 'n_clusters' must be an integer >= 2"
+                    }), 400
+
+                validated_params["n_clusters"] = n_clusters
+                validated_params["max_samples"] = params.get("max_samples", 20000)
+                validated_params["config"] = {
+                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
+                }
+                validated_params["time_field"] = params.get("time_field", "timestamp")
+                validated_params["includes_metas"] = params.get("includes_metas")
+
+            elif method == "auto_kmeans":
+                # Validate parameters
+                config = params.get("config", {})
+                selector_method = config.get("method", "elbow")
+                max_k = config.get("max_k", 20)
+
+                if selector_method not in ["elbow", "silhouette"]:
+                    return jsonify({
+                        "error": "Parameter 'method' in config must be 'elbow' or 'silhouette'"
+                    }), 400
+
+                if not isinstance(max_k, int) or max_k < 2:
+                    return jsonify({
+                        "error": "Parameter 'max_k' must be an integer >= 2"
+                    }), 400
+
+                validated_params["max_samples"] = params.get("max_samples", 20000)
+                validated_params["config"] = {
+                    "method": selector_method,
+                    "max_k": max_k,
+                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
+                }
+                validated_params["time_field"] = params.get("time_field", "timestamp")
+                validated_params["includes_metas"] = params.get("includes_metas")
+
+            elif method == "dbscan":
+                # Validate parameters
+                eps = params.get("eps", 0.5)
+                if not isinstance(eps, (int, float)) or eps <= 0:
+                    return jsonify({
+                        "error": "Parameter 'eps' must be a positive number"
+                    }), 400
+
+                min_samples = params.get("min_samples", 5)
+                if not isinstance(min_samples, int) or min_samples < 1:
+                    return jsonify({
+                        "error": "Parameter 'min_samples' must be an integer >= 1"
+                    }), 400
+
+                validated_params["eps"] = eps
+                validated_params["min_samples"] = min_samples
+                validated_params["max_samples"] = params.get("max_samples", 20000)
+                validated_params["config"] = {
+                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
+                }
+                validated_params["time_field"] = params.get("time_field", "timestamp")
+                validated_params["includes_metas"] = params.get("includes_metas")
+
+            # Validate common parameters
+            max_samples = validated_params.get("max_samples")
+            if not isinstance(max_samples, int) or max_samples <= 0:
+                return jsonify({
+                    "error": "Parameter 'max_samples' must be a positive integer"
+                }), 400
+
+            # Create job ID
             job_id = str(uuid.uuid4())
             self._analysis_jobs[job_id] = {
                 "job_id": job_id,
                 "collection": name,
+                "method": method,
+                "params": validated_params,
                 "status": "pending",
                 "created_at": time.time(),
                 "result": None
             }
 
-            # 4. 提交到线程池
+            # Submit to thread pool
             self._analysis_executor.submit(
-                run_analysis_task, job_id, name, n_clusters, max_samples
+                self._run_analysis_task, job_id, name, method, validated_params
             )
 
-            # 5. 立即返回 Job ID
             return jsonify({
                 "status": "accepted",
                 "job_id": job_id,
-                "message": "Analysis started in background."
+                "method": method,
+                "message": f"{method} analysis started in background."
             }), 202
 
         @route("/api/analysis/<job_id>", methods=["GET"])
@@ -605,6 +673,40 @@ class VectorDBService:
         
         print(f"Starting standalone VectorDB at http://{host}:{port}")
         app.run(host=host, port=port, debug=debug)
+
+    def _run_analysis_task(self, job_id: str, collection_name: str, method: str, params: dict):
+        """
+        Execute analysis task in background thread with specified clustering method.
+
+        This is an internal method that handles the actual clustering execution
+        based on the selected method and parameters.
+        """
+        try:
+            # Update status
+            self._analysis_jobs[job_id]["status"] = "processing"
+
+            # Get repository
+            repo = self.engine.get_repository(collection_name)
+            if not repo:
+                raise ValueError(f"Collection {collection_name} not found")
+
+            # Execute clustering based on method
+            if method == "kmeans":
+                result = repo.analyze_clusters(**params)
+            elif method == "auto_kmeans":
+                result = repo.analyze_clusters_auto_k(**params)
+            elif method == "dbscan":
+                result = repo.analyze_clusters_dbscan(**params)
+            else:
+                raise ValueError(f"Unknown clustering method: {method}")
+
+            self._analysis_jobs[job_id]["result"] = result
+            self._analysis_jobs[job_id]["status"] = "completed"
+
+        except Exception as e:
+            logger.error(f"Analysis job {job_id} failed: {e}")
+            self._analysis_jobs[job_id]["error"] = str(e)
+            self._analysis_jobs[job_id]["status"] = "failed"
 
 
 # --- Usage Examples ---

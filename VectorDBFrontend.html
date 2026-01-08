@@ -224,44 +224,96 @@
                         </div>
                     </div>
                 </div>
-<div v-else-if="currentTab === 'explore'" class="flex h-full bg-slate-50">
+                <div v-else-if="currentTab === 'explore'" class="flex h-full bg-slate-50">
 
-                    <div class="flex-1 flex flex-col h-full relative">
-                        <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-2 rounded shadow border border-gray-200 flex items-center space-x-3">
-                            <div v-if="activeCluster === null" class="flex items-center space-x-3">
+                        <div class="flex-1 flex flex-col h-full relative">
+                            <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-4 rounded shadow border border-gray-200 flex items-center space-x-3 min-w-[500px]">
+                                <div v-if="activeCluster === null" class="flex items-center space-x-4">
+
+                                <!-- 方法选择 -->
                                 <div>
-                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clusters</label>
-                                    <input v-model.number="exploreConfig.n_clusters" type="number" class="w-16 border rounded px-1 text-sm">
+                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clustering Method</label>
+                                    <select v-model="exploreConfig.method" class="w-40 border rounded px-2 py-1 text-sm bg-white">
+                                        <option value="kmeans">K-means (Manual K)</option>
+                                        <option value="auto_kmeans">K-means (Auto K)</option>
+                                        <option value="dbscan">DBSCAN (Density-based)</option>
+                                    </select>
                                 </div>
+
+                                <!-- K-means 参数（当选择manual kmeans时显示） -->
+                                <div v-if="exploreConfig.method === 'kmeans'">
+                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clusters (K)</label>
+                                    <input v-model.number="exploreConfig.kmeans.n_clusters" type="number"
+                                           min="2" max="50" class="w-20 border rounded px-2 py-1 text-sm">
+                                </div>
+
+                                <!-- Auto K-means 参数（当选择auto_kmeans时显示） -->
+                                <div v-if="exploreConfig.method === 'auto_kmeans'" class="flex space-x-2">
+                                    <div>
+                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Method</label>
+                                        <select v-model="exploreConfig.auto_kmeans.selector_method" class="w-20 border rounded px-1 py-1 text-sm bg-white">
+                                            <option value="elbow">Elbow</option>
+                                            <option value="silhouette">Silhouette</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Max K</label>
+                                        <input v-model.number="exploreConfig.auto_kmeans.max_k" type="number"
+                                               min="2" max="100" class="w-16 border rounded px-1 py-1 text-sm">
+                                    </div>
+                                </div>
+
+                                <!-- DBSCAN 参数 -->
+                                <div v-if="exploreConfig.method === 'dbscan'" class="flex space-x-2">
+                                    <div>
+                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Epsilon (eps)</label>
+                                        <input v-model.number="exploreConfig.dbscan.eps" type="number"
+                                               step="0.1" min="0.1" max="2.0" class="w-16 border rounded px-2 py-1 text-sm">
+                                    </div>
+                                    <div>
+                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Min Samples</label>
+                                        <input v-model.number="exploreConfig.dbscan.min_samples" type="number"
+                                               min="1" max="20" class="w-16 border rounded px-2 py-1 text-sm">
+                                    </div>
+                                </div>
+
+                                <!-- 公共参数 -->
                                 <div>
                                     <label class="text-[10px] uppercase font-bold text-gray-500 block">Max Samples</label>
-                                    <select v-model.number="exploreConfig.max_samples" class="border rounded px-1 text-sm bg-white">
+                                    <select v-model.number="exploreConfig.max_samples" class="w-24 border rounded px-2 py-1 text-sm bg-white">
                                         <option value="5000">5k (Fast)</option>
                                         <option value="20000">20k (Detailed)</option>
                                         <option value="50000">50k (Slow)</option>
                                     </select>
                                 </div>
-                                <div class="h-8 w-px bg-gray-300 mx-2"></div>
-                                <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
-                                    class="bg-indigo-600 text-white px-3 py-1 rounded text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center">
-                                    <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
-                                    {{ analysisState.status === 'processing' ? 'Computing...' : 'Analyze Map' }}
-                                </button>
-                            </div>
-                            <div v-else>
-                                <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
-                                    <i class="fa-solid fa-arrow-left mr-2"></i> Show All Groups
-                                </button>
-                            </div>
-                        </div>
 
-                        <div ref="chartContainer" class="w-full h-full bg-slate-50">
-                            <div v-if="!analysisState.hasData && analysisState.status !== 'processing'" class="h-full flex flex-col items-center justify-center text-gray-400">
-                                <i class="fa-solid fa-map-location-dot text-5xl mb-3 text-gray-300"></i>
-                                <p>Click "Analyze Map" to visualize your data topology.</p>
+                                    <div class="h-8 w-px bg-gray-300 mx-2"></div>
+
+                                    <!-- 分析按钮 -->
+                                    <div>
+                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">&nbsp;</label>
+                                        <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
+                                            class="bg-indigo-600 text-white px-4 py-1 rounded text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center whitespace-nowrap">
+                                            <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
+                                            {{ analysisState.status === 'processing' ? 'Computing...' : 'Analyze' }}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div v-else>
+                                    <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
+                                        <i class="fa-solid fa-arrow-left mr-2"></i> Show All Groups
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div ref="chartContainer" class="w-full h-full bg-slate-50">
+                                <div v-if="!analysisState.hasData && analysisState.status !== 'processing'" class="h-full flex flex-col items-center justify-center text-gray-400">
+                                    <i class="fa-solid fa-map-location-dot text-5xl mb-3 text-gray-300"></i>
+                                    <p>Select clustering method and click "Analyze" to visualize your data topology.</p>
+                                </div>
                             </div>
                         </div>
-                    </div>
 
                     <div class="w-96 bg-white border-l border-gray-200 flex flex-col h-full shadow-lg z-10 transition-all">
 
@@ -436,9 +488,6 @@
                 const chartContainer = ref(null);
                 let chartInstance = null; // ECharts instance (non-reactive)
 
-                // 核心配置对象 (之前报错就是因为没 Return 这个)
-                const exploreConfig = ref({ n_clusters: 15, max_samples: 20000 });
-
                 const analysisState = ref({ status: 'idle', hasData: false, jobId: null });
                 const exploreData = ref({ clusters: [], points: [] });
 
@@ -447,6 +496,22 @@
 
                 // Queue Monitoring
                 const queueStats = ref({ qsize: 0, status: 'stopped' });
+
+                const exploreConfig = ref({
+                    method: 'kmeans', // 'kmeans', 'auto_kmeans', 'dbscan'
+                    max_samples: 20000,
+                    kmeans: {
+                        n_clusters: 15
+                    },
+                    auto_kmeans: {
+                        selector_method: 'elbow', // 'elbow' 或 'silhouette'
+                        max_k: 20
+                    },
+                    dbscan: {
+                        eps: 0.5,
+                        min_samples: 5
+                    }
+                });
 
                 // --- Computed ---
                 const activeClusterItems = computed(() => {
@@ -588,8 +653,9 @@
                     }
                 };
 
-                // --- NEW: Analysis & Visualization Logic ---
+                // --- Analysis & Visualization Logic ---
 
+                // 修改 startAnalysis 函数
                 const startAnalysis = async () => {
                     if(!selectedCollection.value) return;
 
@@ -597,19 +663,64 @@
                     analysisState.value.hasData = false;
                     activeCluster.value = null; // Reset focus
 
+                    // 根据选择的方法构建参数
+                    let requestBody = {
+                        method: exploreConfig.value.method
+                    };
+
+                    // 初始化 params
+                    let params = {
+                        max_samples: exploreConfig.value.max_samples
+                    };
+
+                    // 根据不同的聚类方法添加特定参数
+                    if (exploreConfig.value.method === 'kmeans') {
+                        params.n_clusters = exploreConfig.value.kmeans.n_clusters;
+                        // 添加权重配置
+                        params.weights = {
+                            semantic: 1.0,
+                            time: 0.2,
+                            entities: 0.5
+                        };
+                    } else if (exploreConfig.value.method === 'auto_kmeans') {
+                        // 将K选择方法和最大K值放入config
+                        params.config = {
+                            method: exploreConfig.value.auto_kmeans.selector_method, // elbow 或 silhouette
+                            max_k: exploreConfig.value.auto_kmeans.max_k,
+                            weights: {
+                                semantic: 1.0,
+                                time: 0.2,
+                                entities: 0.5
+                            }
+                        };
+                    } else if (exploreConfig.value.method === 'dbscan') {
+                        params.eps = exploreConfig.value.dbscan.eps;
+                        params.min_samples = exploreConfig.value.dbscan.min_samples;
+                        // 添加权重配置
+                        params.weights = {
+                            semantic: 1.0,
+                            time: 0.2,
+                            entities: 0.5
+                        };
+                    }
+
+                    requestBody.params = params;
+
+                    console.log("Sending analysis request:", JSON.stringify(requestBody, null, 2));
+
                     try {
                         const res = await fetch(`${getBaseUrl()}/analysis`, {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({
-                                n_clusters: exploreConfig.value.n_clusters,
-                                max_samples: exploreConfig.value.max_samples
-                            })
+                            body: JSON.stringify(requestBody)
                         });
 
                         const data = await res.json();
+                        console.log("Analysis response:", data);
+
                         if(res.status === 202) {
                             analysisState.value.jobId = data.job_id;
+                            analysisState.value.method = exploreConfig.value.method;
                             pollAnalysis(data.job_id);
                         } else {
                             throw new Error(data.error || "Analysis failed to start");
