@@ -9,20 +9,20 @@ from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, request, jsonify, send_file, Response
 
+
 # Import the core engine defined in the previous step
 try:
     from VectorStorageEngine import VectorStorageEngine
+    from ClusterAnalysisPipeline import AnalysisConfig
 except ImportError:
     from .VectorStorageEngine import VectorStorageEngine
-
+    from .ClusterAnalysisPipeline import AnalysisConfig
 
 # Configure Logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 # os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
 
 # DEFAULT_MODEL = 'BAAI/bge-m3'
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
@@ -41,7 +41,7 @@ class ServiceUnavailable(Exception):
 class VectorDBService:
     """
     VectorDBService: The Web API Layer.
-    
+
     Responsibilities:
     1. Wraps the VectorStorageEngine with a REST API.
     2. Serves the VectorDBFrontend.html UI.
@@ -57,12 +57,12 @@ class VectorDBService:
         self.engine = engine
         self.frontend_filename = frontend_filename
         self._is_registered = False
-        
+
         # Locate the frontend file relative to this script
         self._base_dir = os.path.dirname(os.path.abspath(__file__))
         self._frontend_path = os.path.join(self._base_dir, self.frontend_filename)
 
-        self._analysis_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisWorker")
+        self._analysis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AnalysisWorker")
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
 
         self.metrics = {
@@ -206,7 +206,7 @@ class VectorDBService:
                 if not doc_id or not text:
                     return jsonify({"error": "doc_id and text are required"}), 400
 
-                get_repo_strict(name)   # Call this function to check the engine and repository status in a unified way.
+                get_repo_strict(name)  # Call this function to check the engine and repository status in a unified way.
 
                 if self.engine.submit_upsert(name, doc_id, text, metadata):
                     return jsonify({
@@ -241,7 +241,7 @@ class VectorDBService:
                         "metadata": item.get("metadata", {})
                     })
 
-                get_repo_strict(name)   # Call this function to check the engine and repository status in a unified way.
+                get_repo_strict(name)  # Call this function to check the engine and repository status in a unified way.
 
                 if self.engine.submit_upsert_batch(tasks):
                     return jsonify({"status": "queued", "count": len(tasks)}), 202
@@ -335,7 +335,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                raise e     # Handled by errorhandler
+                raise e  # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -365,7 +365,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                raise e     # Handled by errorhandler
+                raise e  # Handled by errorhandler
             except Exception as e:
                 logger.error(f"Search failed: {e}")
                 return jsonify({"error": str(e)}), 500
@@ -382,7 +382,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                raise e     # Handled by errorhandler
+                raise e  # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -395,7 +395,7 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                raise e     # Handled by errorhandler
+                raise e  # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -474,140 +474,82 @@ class VectorDBService:
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
-                raise e     # Handled by errorhandler
+                raise e  # Handled by errorhandler
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
         @route("/api/collections/<name>/analysis", methods=["POST"])
         def trigger_analysis(name):
             """
-            Submit a clustering analysis job with different clustering methods.
+            New generic analysis endpoint.
+            Constructs an AnalysisConfig from JSON and submits it.
 
-            This endpoint accepts different clustering methods (kmeans, auto_kmeans, dbscan)
-            each with their own parameters. The analysis runs asynchronously in the background.
+            Expected JSON Body:
+            {
+                "filter_criteria": { "category": "security" },
+                "time_range": [1700000000, 1700086400],  // Optional: [start, end]
+                "limit": 50000,
+                "reduce_method": "umap",
+                "reduce_params": { "n_neighbors": 15 },
+                "cluster_method": "birch",
+                "cluster_params": { "threshold": 0.5 },
+                "time_weight": 0.2
+            }
             """
-            # Clean up old jobs (older than 1 hour)
+            # 1. Clean up old jobs
             current_time = time.time()
             expired_jobs = [jid for jid, j in self._analysis_jobs.items()
                             if current_time - j['created_at'] > 3600]
-            for jid in expired_jobs:
-                del self._analysis_jobs[jid]
+            for jid in expired_jobs: del self._analysis_jobs[jid]
 
-            # Check if collection exists
-            get_repo_strict(name)
+            # 2. Validation
+            try:
+                get_repo_strict(name)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 404
 
-            # Parse request data
             data = request.json or {}
-            method = data.get("method", "kmeans").lower()  # Default to kmeans
-            params = data.get("params", {})
 
-            # Validate method
-            valid_methods = ["kmeans", "auto_kmeans", "dbscan"]
-            if method not in valid_methods:
-                return jsonify({
-                    "error": f"Invalid method '{method}'. Must be one of: {', '.join(valid_methods)}"
-                }), 400
+            # 3. Construct Parameters for Config
+            # 将前端松散的 JSON 转化为后端严格的参数字典
 
-            # Validate and prepare parameters based on method
-            validated_params = {}
+            # 处理时间范围: list -> tuple
+            time_range_raw = data.get("time_range")
+            time_range = None
+            if time_range_raw and isinstance(time_range_raw, list) and len(time_range_raw) == 2:
+                time_range = (float(time_range_raw[0]), float(time_range_raw[1]))
 
-            if method == "kmeans":
-                # Required parameters
-                n_clusters = params.get("n_clusters")
-                if n_clusters is None:
-                    return jsonify({
-                        "error": "Parameter 'n_clusters' is required for kmeans method"
-                    }), 400
-                if not isinstance(n_clusters, int) or n_clusters < 2:
-                    return jsonify({
-                        "error": "Parameter 'n_clusters' must be an integer >= 2"
-                    }), 400
+            # 构建 Config 初始化参数
+            config_payload = {
+                "filter_criteria": data.get("filter_criteria", {}),
+                "time_range": time_range,
+                "limit": int(data.get("limit", 20000)),
+                "reduce_method": data.get("reduce_method", "pca"),
+                "cluster_method": data.get("cluster_method", "birch"),
+                "reduce_params": data.get("reduce_params", {}),
+                "cluster_params": data.get("cluster_params", {}),
+                "time_weight": float(data.get("time_weight", 0.1))
+            }
 
-                validated_params["n_clusters"] = n_clusters
-                validated_params["max_samples"] = params.get("max_samples", 20000)
-                validated_params["config"] = {
-                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
-                }
-                validated_params["time_field"] = params.get("time_field", "timestamp")
-                validated_params["includes_metas"] = params.get("includes_metas")
-
-            elif method == "auto_kmeans":
-                # Validate parameters
-                config = params.get("config", {})
-                selector_method = config.get("method", "elbow")
-                max_k = config.get("max_k", 20)
-
-                if selector_method not in ["elbow", "silhouette"]:
-                    return jsonify({
-                        "error": "Parameter 'method' in config must be 'elbow' or 'silhouette'"
-                    }), 400
-
-                if not isinstance(max_k, int) or max_k < 2:
-                    return jsonify({
-                        "error": "Parameter 'max_k' must be an integer >= 2"
-                    }), 400
-
-                validated_params["max_samples"] = params.get("max_samples", 20000)
-                validated_params["config"] = {
-                    "method": selector_method,
-                    "max_k": max_k,
-                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
-                }
-                validated_params["time_field"] = params.get("time_field", "timestamp")
-                validated_params["includes_metas"] = params.get("includes_metas")
-
-            elif method == "dbscan":
-                # Validate parameters
-                eps = params.get("eps", 0.5)
-                if not isinstance(eps, (int, float)) or eps <= 0:
-                    return jsonify({
-                        "error": "Parameter 'eps' must be a positive number"
-                    }), 400
-
-                min_samples = params.get("min_samples", 5)
-                if not isinstance(min_samples, int) or min_samples < 1:
-                    return jsonify({
-                        "error": "Parameter 'min_samples' must be an integer >= 1"
-                    }), 400
-
-                validated_params["eps"] = eps
-                validated_params["min_samples"] = min_samples
-                validated_params["max_samples"] = params.get("max_samples", 20000)
-                validated_params["config"] = {
-                    "weights": params.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
-                }
-                validated_params["time_field"] = params.get("time_field", "timestamp")
-                validated_params["includes_metas"] = params.get("includes_metas")
-
-            # Validate common parameters
-            max_samples = validated_params.get("max_samples")
-            if not isinstance(max_samples, int) or max_samples <= 0:
-                return jsonify({
-                    "error": "Parameter 'max_samples' must be a positive integer"
-                }), 400
-
-            # Create job ID
+            # 4. Submit Job
             job_id = str(uuid.uuid4())
             self._analysis_jobs[job_id] = {
                 "job_id": job_id,
                 "collection": name,
-                "method": method,
-                "params": validated_params,
                 "status": "pending",
                 "created_at": time.time(),
+                "config_snapshot": config_payload,  # 记录这次跑的参数方便 debug
                 "result": None
             }
 
-            # Submit to thread pool
             self._analysis_executor.submit(
-                self._run_analysis_task, job_id, name, method, validated_params
+                self._run_analysis_task, job_id, name, config_payload
             )
 
             return jsonify({
                 "status": "accepted",
                 "job_id": job_id,
-                "method": method,
-                "message": f"{method} analysis started in background."
+                "message": "Analysis pipeline started."
             }), 202
 
         @route("/api/analysis/<job_id>", methods=["GET"])
@@ -645,10 +587,42 @@ class VectorDBService:
 
         return bp
 
+    def _run_analysis_task(self, job_id: str, collection_name: str, config_payload: Dict[str, Any]):
+        """
+        Background Worker:
+        1. Instantiates AnalysisConfig.
+        2. Calls repo.run_analysis(config).
+        """
+        try:
+            self._analysis_jobs[job_id]["status"] = "processing"
+
+            repo = self.engine.get_repository(collection_name)
+            if not repo:
+                raise ValueError(f"Collection {collection_name} disappeared")
+
+            # 实例化配置对象
+            # 使用 **config_payload 解包字典，直接对应 AnalysisConfig 的字段
+            config = AnalysisConfig(**config_payload)
+
+            # [CRITICAL] 调用统一的新接口
+            result = repo.run_analysis(config)
+
+            if "error" in result:
+                self._analysis_jobs[job_id]["status"] = "failed"
+                self._analysis_jobs[job_id]["error"] = result["error"]
+            else:
+                self._analysis_jobs[job_id]["status"] = "completed"
+                self._analysis_jobs[job_id]["result"] = result
+
+        except Exception as e:
+            logger.error(f"Pipeline job {job_id} failed: {e}", exc_info=True)
+            self._analysis_jobs[job_id]["status"] = "failed"
+            self._analysis_jobs[job_id]["error"] = str(e)
+
     def mount_to_app(self, app: Flask, url_prefix: str = "/vector-db", wrapper: Optional[Callable] = None) -> bool:
         """
         Mount the dashboard to an existing Flask app instance.
-        
+
         Args:
             app (Flask): The main application instance.
             url_prefix (str): Base URL for the dashboard (e.g. /vector-db).
@@ -667,46 +641,12 @@ class VectorDBService:
     def run_standalone(self, host="0.0.0.0", port=8001, debug=False):
         """Run as a standalone Flask app."""
         app = Flask(__name__)
-        
+
         # Mount at root for standalone usage
         self.mount_to_app(app, url_prefix="")
-        
+
         print(f"Starting standalone VectorDB at http://{host}:{port}")
         app.run(host=host, port=port, debug=debug)
-
-    def _run_analysis_task(self, job_id: str, collection_name: str, method: str, params: dict):
-        """
-        Execute analysis task in background thread with specified clustering method.
-
-        This is an internal method that handles the actual clustering execution
-        based on the selected method and parameters.
-        """
-        try:
-            # Update status
-            self._analysis_jobs[job_id]["status"] = "processing"
-
-            # Get repository
-            repo = self.engine.get_repository(collection_name)
-            if not repo:
-                raise ValueError(f"Collection {collection_name} not found")
-
-            # Execute clustering based on method
-            if method == "kmeans":
-                result = repo.analyze_clusters(**params)
-            elif method == "auto_kmeans":
-                result = repo.analyze_clusters_auto_k(**params)
-            elif method == "dbscan":
-                result = repo.analyze_clusters_dbscan(**params)
-            else:
-                raise ValueError(f"Unknown clustering method: {method}")
-
-            self._analysis_jobs[job_id]["result"] = result
-            self._analysis_jobs[job_id]["status"] = "completed"
-
-        except Exception as e:
-            logger.error(f"Analysis job {job_id} failed: {e}")
-            self._analysis_jobs[job_id]["error"] = str(e)
-            self._analysis_jobs[job_id]["status"] = "failed"
 
 
 # --- Usage Examples ---

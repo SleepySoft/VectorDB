@@ -7,221 +7,17 @@ import shutil
 import datetime
 import logging
 import threading
-from enum import Enum
-
 import numpy as np
+from enum import Enum
 from chromadb import Settings
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
+
+from VectorDB.ClusterAnalysisPipeline import IntelligenceAnalysisPipeline, AnalysisConfig
 
 
 logger = logging.getLogger(__name__)
 
 os.environ['CHROMA_OTEL_ENABLED'] = 'False'
-
-from abc import ABC, abstractmethod
-from typing import Tuple, List, Optional, Dict, Any
-import numpy as np
-from sklearn.cluster import KMeans
-
-
-class KSelector(ABC):
-    """Abstract base class for K selection strategies."""
-
-    @abstractmethod
-    def find_optimal_k(self, X: np.ndarray, k_range: Tuple[int, int]) -> int:
-        """
-        Find optimal number of clusters K for the given data.
-
-        Args:
-            X: Feature matrix (n_samples, n_features)
-            k_range: Tuple of (min_k, max_k) to search within
-
-        Returns:
-            Optimal K value
-        """
-        pass
-
-
-class ElbowKSelector(KSelector):
-    """Find optimal K using elbow method with binary search."""
-
-    def __init__(self, n_trials: int = 10, patience: int = 3):
-        """
-        Args:
-            n_trials: Maximum number of K values to test
-            patience: Number of consecutive K with minimal improvement to trigger early stopping
-        """
-        self.n_trials = n_trials
-        self.patience = patience
-
-    def find_optimal_k(self, X: np.ndarray, k_range: Tuple[int, int]) -> int:
-        min_k, max_k = k_range
-        n_samples = len(X)
-
-        # Cap max_k at number of samples
-        max_k = min(max_k, n_samples - 1)
-        if max_k <= min_k:
-            return min_k
-
-        # Log-scaled K values for testing
-        k_values = self._get_log_spaced_k(min_k, max_k)
-
-        # Calculate SSE for each K
-        sse_values = []
-        for k in k_values:
-            kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
-            kmeans.fit(X)
-            sse_values.append(kmeans.inertia_)
-
-        # Find elbow point (maximum curvature)
-        optimal_k = self._find_elbow_point(k_values, sse_values)
-
-        # Refine around elbow point if needed
-        if optimal_k == k_values[0] or optimal_k == k_values[-1]:
-            # Elbow at boundary, search nearby
-            if optimal_k == k_values[0] and optimal_k > min_k:
-                refine_min = max(min_k, optimal_k - 5)
-                refine_max = min(max_k, optimal_k + 5)
-                refined_k = self._binary_search_elbow(X, refine_min, refine_max)
-                if refined_k is not None:
-                    optimal_k = refined_k
-            elif optimal_k == k_values[-1] and optimal_k < max_k:
-                refine_min = max(min_k, optimal_k - 5)
-                refine_max = min(max_k, optimal_k + 5)
-                refined_k = self._binary_search_elbow(X, refine_min, refine_max)
-                if refined_k is not None:
-                    optimal_k = refined_k
-
-        return optimal_k
-
-    def _get_log_spaced_k(self, min_k: int, max_k: int) -> List[int]:
-        """Generate logarithmically spaced K values."""
-        if max_k <= 10:
-            return list(range(min_k, max_k + 1))
-
-        # Generate log-spaced points
-        k_values = [2, 3, 4, 5, 6, 7, 8, 9, 10]
-        if max_k > 20:
-            k_values.extend([15, 20])
-        if max_k > 30:
-            k_values.extend([30, 40])
-        if max_k > 50:
-            k_values.extend([50, 75, 100])
-        if max_k > 100:
-            k_values.extend([150, 200, 300, 400, 500])
-
-        # Filter to range and ensure endpoints included
-        k_values = [k for k in k_values if min_k <= k <= max_k]
-        if min_k not in k_values:
-            k_values.insert(0, min_k)
-        if max_k not in k_values:
-            k_values.append(max_k)
-
-        return sorted(list(set(k_values)))[:self.n_trials]
-
-    def _find_elbow_point(self, k_values: List[int], sse_values: List[float]) -> int:
-        """Find elbow point using maximum normalized curvature."""
-        if len(k_values) < 3:
-            return k_values[0] if sse_values[0] > sse_values[-1] else k_values[-1]
-
-        # Calculate normalized distances from line connecting endpoints
-        start_point = (k_values[0], sse_values[0])
-        end_point = (k_values[-1], sse_values[-1])
-
-        # Line equation: y = mx + b
-        m = (end_point[1] - start_point[1]) / (end_point[0] - start_point[0])
-        b = start_point[1] - m * start_point[0]
-
-        # Calculate perpendicular distances
-        max_dist = 0
-        elbow_idx = 0
-
-        for i, (k, sse) in enumerate(zip(k_values, sse_values)):
-            # Calculate perpendicular distance from point to line
-            dist = abs(m * k - sse + b) / np.sqrt(m ** 2 + 1)
-
-            # Normalize by distance from start (to avoid favoring endpoints)
-            norm_factor = (k - k_values[0]) / (k_values[-1] - k_values[0])
-            if norm_factor > 0:
-                dist /= norm_factor
-
-            if dist > max_dist:
-                max_dist = dist
-                elbow_idx = i
-
-        return k_values[elbow_idx]
-
-    def _binary_search_elbow(self, X: np.ndarray, min_k: int, max_k: int) -> Optional[int]:
-        """Binary search for elbow in a narrow range."""
-        if max_k - min_k <= 3:
-            return None
-
-        mid = (min_k + max_k) // 2
-
-        # Test K values
-        k_candidates = [min_k, mid, max_k]
-        sse_values = []
-        for k in k_candidates:
-            kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
-            kmeans.fit(X)
-            sse_values.append(kmeans.inertia_)
-
-        # Find elbow among these points
-        elbow_k = self._find_elbow_point(k_candidates, sse_values)
-
-        if elbow_k == k_candidates[0]:
-            return self._binary_search_elbow(X, min_k, mid)
-        elif elbow_k == k_candidates[-1]:
-            return self._binary_search_elbow(X, mid, max_k)
-        else:
-            return elbow_k
-
-
-class SilhouetteKSelector(KSelector):
-    """Find optimal K using silhouette score (slower but more accurate)."""
-
-    def __init__(self, sample_size: Optional[int] = 1000):
-        self.sample_size = sample_size
-
-    def find_optimal_k(self, X: np.ndarray, k_range: Tuple[int, int]) -> int:
-        from sklearn.metrics import silhouette_score
-
-        min_k, max_k = k_range
-        n_samples = len(X)
-
-        # Cap max_k
-        max_k = min(max_k, n_samples - 1)
-        if max_k <= min_k:
-            return min_k
-
-        # Sample data if too large
-        if self.sample_size and n_samples > self.sample_size:
-            indices = np.random.choice(n_samples, self.sample_size, replace=False)
-            X_sampled = X[indices]
-        else:
-            X_sampled = X
-
-        # Test K values
-        k_candidates = [2, 3, 4, 5, 6, 7, 8, 9, 10]
-        k_candidates = [k for k in k_candidates if min_k <= k <= max_k]
-
-        if len(k_candidates) < 2:
-            return min_k
-
-        # Calculate silhouette scores
-        scores = []
-        for k in k_candidates:
-            kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
-            labels = kmeans.fit_predict(X_sampled)
-            if len(set(labels)) > 1:  # Need at least 2 clusters
-                score = silhouette_score(X_sampled, labels)
-                scores.append(score)
-            else:
-                scores.append(0)
-
-        # Find K with highest silhouette score
-        best_idx = np.argmax(scores)
-        return k_candidates[best_idx]
 
 
 # Note: Heavy imports (chromadb, sentence_transformers) are delayed inside methods
@@ -1031,386 +827,50 @@ class VectorCollectionRepo:
         except (json.JSONDecodeError, TypeError):
             return value
 
-    def analyze_clusters(self,
-                         n_clusters: int = 20,
-                         max_samples: int = 50000,
-                         config: Dict[str, Any] = None,
-                         time_field: str = "timestamp",
-                         includes_metas: Optional[list] = None) -> Dict[str, Any]:
+    def fetch_for_analysis(self,
+                           filter_criteria: Dict[str, Any],
+                           time_range: Optional[Tuple[float, float]],
+                           limit: int) -> Dict[str, Any]:
         """
-        Main Orchestrator for Analysis.
-        config example: {"weights": {"semantic": 1.0, "time": 0.5}, "use_pca": True}
+        Public Interface used by IntelligenceAnalysisPipeline to retrieve raw data.
+        Does not perform any calculation.
         """
-        from sklearn.cluster import MiniBatchKMeans
-        from sklearn.decomposition import PCA
+        criteria = filter_criteria.copy()
 
-        config = config or {"weights": {"semantic": 1.0, "time": 0.2, "entities": 0.5}}
+        # Merge time range into criteria if provided
+        if time_range:
+            start, end = time_range
+            # Assuming metadata field is named 'timestamp'
+            if "timestamp" in criteria:
+                # Merge with existing logic if complex
+                pass
+            else:
+                criteria["timestamp"] = {"$gte": start, "$lte": end}
 
-        # --- 1. Data Retrieval (Batch Fetching for Memory Safety) ---
-        # 即使只采样 5w 条，一次性 load进内存也很大，建议分批读
-        BATCH_SIZE = 5000
-        total_in_db = self.count()
-        target_limit = min(total_in_db, max_samples)
-
-        # 临时存储容器
-        accumulated_ids = []
-        accumulated_embeddings = []
-        accumulated_metadatas = []
-        accumulated_docs = []
-
-        processed = 0
-
-        while processed < target_limit:
-            fetch_size = min(BATCH_SIZE, target_limit - processed)
-
-            # ChromaDB get
+        try:
+            # Direct call to ChromaDB
             results = self._collection.get(
-                limit=fetch_size,
-                offset=processed,
-                include=['embeddings', 'metadatas', 'documents']
+                where=criteria if criteria else None,  # Empty dict means no filter
+                limit=limit,
+                include=['embeddings', 'metadatas', 'documents', 'ids']
             )
+            return results
+        except Exception as e:
+            logger.error(f"DB Fetch failed: {e}")
+            return {}
 
-            if not results['ids']:
-                break
-
-            accumulated_ids.extend(results['ids'])
-            accumulated_embeddings.extend(results['embeddings'])
-            accumulated_metadatas.extend(results['metadatas'])
-            accumulated_docs.extend(results['documents'])
-
-            processed += len(results['ids'])
-
-            # 简单的防卡死 sleep，让出 GIL
-            time.sleep(0.01)
-
-        if not accumulated_ids:
-            return {"error": "No data found"}
-
-        # 构造符合 _aggregate_to_articles 接口的数据结构
-        raw_data = {
-            'ids': accumulated_ids,
-            'embeddings': accumulated_embeddings,
-            'metadatas': accumulated_metadatas,
-            'documents': accumulated_docs
-        }
-
-        # --- 2. Aggregation & Feature Fusion ---
-        X, article_ids, previews = self._aggregate_to_articles(
-            raw_data,
-            config.get("weights"),
-            time_field=time_field,
-            includes_metas=includes_metas
-        )
-
-        # --- 3. Dimensionality Reduction (For visualization) ---
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(X)
-
-        # --- 4. Clustering ---
-        actual_n_clusters = min(n_clusters, len(article_ids))
-        if actual_n_clusters < 2:
-            # 如果只有1篇文章，无法聚类，直接返回
-            return {"error": "Not enough data to cluster"}
-
-        kmeans = MiniBatchKMeans(n_clusters=actual_n_clusters, n_init="auto", batch_size=1024)
-        labels = kmeans.fit_predict(X)
-
-        # --- 5. Result Generation ---
-        dist_matrix = kmeans.transform(X)
-        points_data = []
-        # 初始化中心代表文档容器
-        cluster_reps = {i: {"dist": float('inf'), "text": ""} for i in range(actual_n_clusters)}
-
-        for i in range(len(article_ids)):
-            c_id = int(labels[i])
-            dist = dist_matrix[i][c_id]
-
-            points_data.append({
-                "id": article_ids[i],
-                "x": round(float(coords[i][0]), 4),
-                "y": round(float(coords[i][1]), 4),
-                "cluster": c_id,
-                "preview": previews[i],
-                "doc_id": article_ids[i]
-            })
-
-            # 寻找离中心最近的点作为 Topic Preview
-            if dist < cluster_reps[c_id]["dist"]:
-                cluster_reps[c_id] = {"dist": dist, "text": previews[i]}
-
-        clusters_info = [
-            {
-                "cluster_id": i,
-                "topic_preview": cluster_reps[i]["text"],
-                "count": int(np.sum(labels == i))
-            } for i in range(actual_n_clusters)
-        ]
-
-        return {
-            "total_articles": len(article_ids),
-            "total_chunks_scanned": processed,
-            "clusters": clusters_info,
-            "points": points_data
-        }
-
-    def analyze_clusters_auto_k(
-            self,
-            max_samples: int = 50000,
-            config: Dict[str, Any] = None,
-            time_field: str = "timestamp",
-            includes_metas: Optional[list] = None
-    ) -> Dict[str, Any]:
+    def run_analysis(self, config: AnalysisConfig) -> Dict[str, Any]:
         """
-        Automatic clustering that determines optimal K and reuses original clustering.
-
-        This method finds the optimal number of clusters using specified method,
-        then calls the original analyze_clusters with the found K.
-
-        Args:
-            max_samples: Maximum number of samples to process
-            config: Configuration dictionary containing 'method', 'max_k', and 'weights'
-            time_field: Metadata field containing timestamp
-            includes_metas: List of metadata fields to include in clustering
-
-        Returns:
-            Dictionary containing clustering results
+        Entry point for running an analysis session.
+        Creates a disposable pipeline, executes it, and returns the result.
         """
-        from sklearn.decomposition import PCA
+        # Create pipeline instance (Connecting Repo <-> Pipeline)
+        pipeline = IntelligenceAnalysisPipeline(repo_interface=self, config=config)
 
-        config = config or {}
-        selector_method = config.get("method", "elbow")  # "elbow" or "silhouette"
-        max_k = config.get("max_k", 20)
-        weights = config.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
-
-        # 1. Data Retrieval and Feature Fusion (same as original)
-        BATCH_SIZE = 5000
-        total_in_db = self.count()
-        target_limit = min(total_in_db, max_samples)
-
-        accumulated_ids = []
-        accumulated_embeddings = []
-        accumulated_metadatas = []
-        accumulated_docs = []
-        processed = 0
-
-        while processed < target_limit:
-            fetch_size = min(BATCH_SIZE, target_limit - processed)
-            results = self._collection.get(
-                limit=fetch_size,
-                offset=processed,
-                include=['embeddings', 'metadatas', 'documents']
-            )
-
-            if not results['ids']:
-                break
-
-            accumulated_ids.extend(results['ids'])
-            accumulated_embeddings.extend(results['embeddings'])
-            accumulated_metadatas.extend(results['metadatas'])
-            accumulated_docs.extend(results['documents'])
-
-            processed += len(results['ids'])
-            time.sleep(0.01)
-
-        if not accumulated_ids:
-            return {"error": "No data found"}
-
-        # 2. Aggregation & Feature Fusion
-        raw_data = {
-            'ids': accumulated_ids,
-            'embeddings': accumulated_embeddings,
-            'metadatas': accumulated_metadatas,
-            'documents': accumulated_docs
-        }
-
-        X, article_ids, previews = self._aggregate_to_articles(
-            raw_data,
-            weights,
-            time_field=time_field,
-            includes_metas=includes_metas
-        )
-
-        if len(article_ids) < 2:
-            return {"error": "Not enough data to cluster"}
-
-        # 3. Find optimal K using specified method
-        if selector_method == "silhouette":
-            k_selector = SilhouetteKSelector(sample_size=1000)
-        else:  # default to elbow
-            k_selector = ElbowKSelector(n_trials=15, patience=3)
-
-        optimal_k = k_selector.find_optimal_k(X, (2, min(max_k, len(article_ids))))
-
-        print(f"Found optimal K using {selector_method} method: {optimal_k}")
-
-        # 4. Reuse original clustering function with optimal K
-        # Prepare parameters for original analyze_clusters
-        # Note: We need to remove method-specific configs
-        clustering_config = config.copy()
-        clustering_config.pop('method', None)  # Remove method as it's not needed for original
-        clustering_config.pop('max_k', None)  # Remove max_k as it's not needed for original
-
-        # Call original analyze_clusters with optimal K
-        return self.analyze_clusters(
-            n_clusters=optimal_k,
-            max_samples=max_samples,
-            config=clustering_config,
-            time_field=time_field,
-            includes_metas=includes_metas
-        )
-
-    def analyze_clusters_dbscan(
-            self,
-            eps: float = 0.5,
-            min_samples: int = 5,
-            max_samples: int = 50000,
-            config: Dict[str, Any] = None,
-            time_field: str = "timestamp",
-            includes_metas: Optional[list] = None
-    ) -> Dict[str, Any]:
-        """
-        Density-based clustering using DBSCAN to automatically find clusters.
-
-        DBSCAN doesn't require specifying the number of clusters and can
-        identify noise points and clusters of arbitrary shapes.
-
-        Args:
-            eps: Maximum distance between two samples for one to be considered
-                 as in the neighborhood of the other
-            min_samples: Minimum number of samples in a neighborhood for a point
-                         to be considered as a core point
-            max_samples: Maximum number of samples to process
-            config: Additional configuration
-            time_field: Metadata field containing timestamp
-            includes_metas: List of metadata fields to include
-
-        Returns:
-            Dictionary containing clustering results
-        """
-        from sklearn.cluster import DBSCAN
-        from sklearn.decomposition import PCA
-
-        config = config or {}
-
-        # 1. Data Retrieval (same as before)
-        BATCH_SIZE = 5000
-        total_in_db = self.count()
-        target_limit = min(total_in_db, max_samples)
-
-        accumulated_ids = []
-        accumulated_embeddings = []
-        accumulated_metadatas = []
-        accumulated_docs = []
-        processed = 0
-
-        while processed < target_limit:
-            fetch_size = min(BATCH_SIZE, target_limit - processed)
-            results = self._collection.get(
-                limit=fetch_size,
-                offset=processed,
-                include=['embeddings', 'metadatas', 'documents']
-            )
-
-            if not results['ids']:
-                break
-
-            accumulated_ids.extend(results['ids'])
-            accumulated_embeddings.extend(results['embeddings'])
-            accumulated_metadatas.extend(results['metadatas'])
-            accumulated_docs.extend(results['documents'])
-
-            processed += len(results['ids'])
-            time.sleep(0.01)
-
-        if not accumulated_ids:
-            return {"error": "No data found"}
-
-        # 2. Aggregation & Feature Fusion
-        raw_data = {
-            'ids': accumulated_ids,
-            'embeddings': accumulated_embeddings,
-            'metadatas': accumulated_metadatas,
-            'documents': accumulated_docs
-        }
-
-        weights = config.get("weights", {"semantic": 1.0, "time": 0.2, "entities": 0.5})
-        X, article_ids, previews = self._aggregate_to_articles(
-            raw_data,
-            weights,
-            time_field=time_field,
-            includes_metas=includes_metas
-        )
-
-        if len(article_ids) < 2:
-            return {"error": "Not enough data to cluster"}
-
-        # 3. Dimensionality Reduction
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(X)
-
-        # 4. DBSCAN Clustering
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-        labels = dbscan.fit_predict(X)
-
-        # Get unique labels (excluding noise points labeled as -1)
-        unique_labels = set(labels)
-        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-
-        print(f"DBSCAN found {n_clusters} clusters and {np.sum(labels == -1)} noise points")
-
-        # 5. Generate results
-        points_data = []
-        cluster_centers = {}
-
-        # Calculate cluster centers (for non-noise clusters)
-        for label in unique_labels:
-            if label == -1:
-                continue
-            mask = labels == label
-            if np.sum(mask) > 0:
-                cluster_centers[label] = np.mean(coords[mask], axis=0)
-
-        for i in range(len(article_ids)):
-            c_id = int(labels[i])
-
-            points_data.append({
-                "id": article_ids[i],
-                "x": round(float(coords[i][0]), 4),
-                "y": round(float(coords[i][1]), 4),
-                "cluster": c_id,
-                "preview": previews[i],
-                "doc_id": article_ids[i],
-                "is_noise": (c_id == -1)
-            })
-
-        # Find representative documents for each cluster
-        clusters_info = []
-        for label in unique_labels:
-            if label == -1:
-                continue
-
-            mask = labels == label
-            if np.sum(mask) > 0:
-                # Find point closest to cluster center
-                cluster_points = coords[mask]
-                distances = np.linalg.norm(cluster_points - cluster_centers[label], axis=1)
-                closest_idx = np.argmin(distances)
-
-                # Get original indices
-                original_indices = np.where(mask)[0]
-                closest_original_idx = original_indices[closest_idx]
-
-                clusters_info.append({
-                    "cluster_id": int(label),
-                    "topic_preview": previews[closest_original_idx],
-                    "count": int(np.sum(mask))
-                })
-
-        return {
-            "total_articles": len(article_ids),
-            "total_chunks_scanned": processed,
-            "n_clusters": n_clusters,
-            "n_noise": int(np.sum(labels == -1)),
-            "clusters": clusters_info,
-            "points": points_data
-        }
+        # Execute
+        try:
+            result = pipeline.execute()
+            return result
+        finally:
+            # Explicit cleanup if necessary, though Python GC handles it
+            del pipeline

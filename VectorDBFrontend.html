@@ -228,77 +228,64 @@
 
                         <div class="flex-1 flex flex-col h-full relative">
                             <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-4 rounded shadow border border-gray-200 flex items-center space-x-3 min-w-[500px]">
-                                <div v-if="activeCluster === null" class="flex items-center space-x-4">
+                            <div v-if="activeCluster === null" class="flex items-center space-x-4">
 
-                                <!-- 方法选择 -->
-                                <div>
-                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clustering Method</label>
-                                    <select v-model="exploreConfig.method" class="w-40 border rounded px-2 py-1 text-sm bg-white">
-                                        <option value="kmeans">K-means (Manual K)</option>
-                                        <option value="auto_kmeans">K-means (Auto K)</option>
-                                        <option value="dbscan">DBSCAN (Density-based)</option>
+                                <div class="flex flex-col">
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Reduction</label>
+                                    <select v-model="exploreConfig.reduce_method" class="w-24 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
+                                        <option value="pca">PCA (Fast)</option>
+                                        <option value="umap">UMAP (Best)</option>
                                     </select>
                                 </div>
 
-                                <!-- K-means 参数（当选择manual kmeans时显示） -->
-                                <div v-if="exploreConfig.method === 'kmeans'">
-                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Clusters (K)</label>
-                                    <input v-model.number="exploreConfig.kmeans.n_clusters" type="number"
-                                           min="2" max="50" class="w-20 border rounded px-2 py-1 text-sm">
-                                </div>
-
-                                <!-- Auto K-means 参数（当选择auto_kmeans时显示） -->
-                                <div v-if="exploreConfig.method === 'auto_kmeans'" class="flex space-x-2">
-                                    <div>
-                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Method</label>
-                                        <select v-model="exploreConfig.auto_kmeans.selector_method" class="w-20 border rounded px-1 py-1 text-sm bg-white">
-                                            <option value="elbow">Elbow</option>
-                                            <option value="silhouette">Silhouette</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Max K</label>
-                                        <input v-model.number="exploreConfig.auto_kmeans.max_k" type="number"
-                                               min="2" max="100" class="w-16 border rounded px-1 py-1 text-sm">
-                                    </div>
-                                </div>
-
-                                <!-- DBSCAN 参数 -->
-                                <div v-if="exploreConfig.method === 'dbscan'" class="flex space-x-2">
-                                    <div>
-                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Epsilon (eps)</label>
-                                        <input v-model.number="exploreConfig.dbscan.eps" type="number"
-                                               step="0.1" min="0.1" max="2.0" class="w-16 border rounded px-2 py-1 text-sm">
-                                    </div>
-                                    <div>
-                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">Min Samples</label>
-                                        <input v-model.number="exploreConfig.dbscan.min_samples" type="number"
-                                               min="1" max="20" class="w-16 border rounded px-2 py-1 text-sm">
-                                    </div>
-                                </div>
-
-                                <!-- 公共参数 -->
-                                <div>
-                                    <label class="text-[10px] uppercase font-bold text-gray-500 block">Max Samples</label>
-                                    <select v-model.number="exploreConfig.max_samples" class="w-24 border rounded px-2 py-1 text-sm bg-white">
-                                        <option value="5000">5k (Fast)</option>
-                                        <option value="20000">20k (Detailed)</option>
-                                        <option value="50000">50k (Slow)</option>
+                                <div class="flex flex-col">
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Clustering</label>
+                                    <select v-model="exploreConfig.cluster_method" class="w-28 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
+                                        <option value="birch">Birch (Auto K)</option>
+                                        <option value="kmeans">K-Means (Fixed)</option>
+                                        <option value="dbscan">DBSCAN</option>
                                     </select>
                                 </div>
 
-                                    <div class="h-8 w-px bg-gray-300 mx-2"></div>
+                                <div v-if="exploreConfig.cluster_method === 'birch'" class="flex flex-col">
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Threshold</label>
+                                    <input v-model.number="exploreConfig.birch.threshold" type="number" step="0.05" min="0.1" max="1.0"
+                                           class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center" title="Smaller = More Clusters">
+                                </div>
 
-                                    <!-- 分析按钮 -->
-                                    <div>
-                                        <label class="text-[10px] uppercase font-bold text-gray-500 block">&nbsp;</label>
-                                        <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
-                                            class="bg-indigo-600 text-white px-4 py-1 rounded text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center whitespace-nowrap">
-                                            <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
-                                            {{ analysisState.status === 'processing' ? 'Computing...' : 'Analyze' }}
-                                        </button>
+                                <div v-if="exploreConfig.cluster_method === 'kmeans'" class="flex flex-col">
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Clusters (K)</label>
+                                    <input v-model.number="exploreConfig.kmeans.n_clusters" type="number" min="2" max="100"
+                                           class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center">
+                                </div>
+
+                                <div v-if="exploreConfig.cluster_method === 'dbscan'" class="flex space-x-2">
+                                    <div class="flex flex-col">
+                                        <label class="text-[10px] uppercase font-bold text-gray-400">Eps</label>
+                                        <input v-model.number="exploreConfig.dbscan.eps" type="number" step="0.1" min="0.1"
+                                               class="w-14 border border-gray-300 rounded px-1 py-1 text-xs text-center">
                                     </div>
                                 </div>
+
+                                <div class="flex flex-col">
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Limit</label>
+                                    <select v-model.number="exploreConfig.limit" class="w-20 border border-gray-300 rounded px-1 py-1 text-xs bg-white">
+                                        <option value="5000">5k Docs</option>
+                                        <option value="20000">20k Docs</option>
+                                        <option value="50000">50k Docs</option>
+                                    </select>
+                                </div>
+
+                                <div class="h-8 w-px bg-gray-300 mx-1"></div>
+
+                                <div class="flex flex-col justify-end">
+                                    <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
+                                        class="bg-indigo-600 text-white px-4 py-1 rounded text-xs font-bold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center h-[26px] shadow-sm transition">
+                                        <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
+                                        {{ analysisState.status === 'processing' ? 'COMPUTING...' : 'ANALYZE' }}
+                                    </button>
+                                </div>
+                            </div>
 
                                 <div v-else>
                                     <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
@@ -498,19 +485,21 @@
                 const queueStats = ref({ qsize: 0, status: 'stopped' });
 
                 const exploreConfig = ref({
-                    method: 'kmeans', // 'kmeans', 'auto_kmeans', 'dbscan'
-                    max_samples: 20000,
-                    kmeans: {
-                        n_clusters: 15
-                    },
-                    auto_kmeans: {
-                        selector_method: 'elbow', // 'elbow' 或 'silhouette'
-                        max_k: 20
-                    },
-                    dbscan: {
-                        eps: 0.5,
-                        min_samples: 5
-                    }
+                    // Backend supports: pca, umap
+                    reduce_method: 'pca',
+
+                    // Backend supports: birch, kmeans, dbscan
+                    cluster_method: 'birch',
+
+                    limit: 20000,
+
+                    // Parameter presets
+                    kmeans: { n_clusters: 15 },
+                    birch: { threshold: 0.5, branching_factor: 50 },
+                    dbscan: { eps: 0.5, min_samples: 5 },
+
+                    // UMAP specific
+                    reduce_params: { n_neighbors: 15, min_dist: 0.1 }
                 });
 
                 // --- Computed ---
@@ -655,108 +644,69 @@
 
                 // --- Analysis & Visualization Logic ---
 
-                // 修改 startAnalysis 函数
                 const startAnalysis = async () => {
                     if(!selectedCollection.value) return;
 
                     analysisState.value.status = 'processing';
                     analysisState.value.hasData = false;
-                    activeCluster.value = null; // Reset focus
+                    activeCluster.value = null;
 
-                    // 根据选择的方法构建参数
-                    let requestBody = {
-                        method: exploreConfig.value.method
+                    // 1. 构建符合后端 AnalysisConfig 的扁平 Payload
+                    const payload = {
+                        limit: exploreConfig.value.limit,
+                        time_weight: 0.1, // Default weight for time-series clustering
+
+                        // Algorithm Selection
+                        reduce_method: exploreConfig.value.reduce_method,
+                        cluster_method: exploreConfig.value.cluster_method,
+
+                        // Params Containers
+                        reduce_params: {},
+                        cluster_params: {}
                     };
 
-                    // 初始化 params
-                    let params = {
-                        max_samples: exploreConfig.value.max_samples
-                    };
+                    // 2. 注入降维参数
+                    if (payload.reduce_method === 'umap') {
+                        payload.reduce_params = { ...exploreConfig.value.reduce_params };
+                    }
 
-                    // 根据不同的聚类方法添加特定参数
-                    if (exploreConfig.value.method === 'kmeans') {
-                        params.n_clusters = exploreConfig.value.kmeans.n_clusters;
-                        // 添加权重配置
-                        params.weights = {
-                            semantic: 1.0,
-                            time: 0.2,
-                            entities: 0.5
+                    // 3. 注入聚类参数 (只注入当前选中的方法的参数)
+                    if (payload.cluster_method === 'kmeans') {
+                        payload.cluster_params = { n_clusters: exploreConfig.value.kmeans.n_clusters };
+                    } else if (payload.cluster_method === 'birch') {
+                        payload.cluster_params = {
+                            threshold: exploreConfig.value.birch.threshold,
+                            branching_factor: exploreConfig.value.birch.branching_factor
                         };
-                    } else if (exploreConfig.value.method === 'auto_kmeans') {
-                        // 将K选择方法和最大K值放入config
-                        params.config = {
-                            method: exploreConfig.value.auto_kmeans.selector_method, // elbow 或 silhouette
-                            max_k: exploreConfig.value.auto_kmeans.max_k,
-                            weights: {
-                                semantic: 1.0,
-                                time: 0.2,
-                                entities: 0.5
-                            }
-                        };
-                    } else if (exploreConfig.value.method === 'dbscan') {
-                        params.eps = exploreConfig.value.dbscan.eps;
-                        params.min_samples = exploreConfig.value.dbscan.min_samples;
-                        // 添加权重配置
-                        params.weights = {
-                            semantic: 1.0,
-                            time: 0.2,
-                            entities: 0.5
+                    } else if (payload.cluster_method === 'dbscan') {
+                        payload.cluster_params = {
+                            eps: exploreConfig.value.dbscan.eps,
+                            min_samples: exploreConfig.value.dbscan.min_samples
                         };
                     }
 
-                    requestBody.params = params;
-
-                    console.log("Sending analysis request:", JSON.stringify(requestBody, null, 2));
+                    console.log("Sending Analysis Payload:", JSON.stringify(payload, null, 2));
 
                     try {
                         const res = await fetch(`${getBaseUrl()}/analysis`, {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(requestBody)
+                            body: JSON.stringify(payload)
                         });
 
                         const data = await res.json();
-                        console.log("Analysis response:", data);
 
                         if(res.status === 202) {
                             analysisState.value.jobId = data.job_id;
-                            analysisState.value.method = exploreConfig.value.method;
+                            // Start polling
                             pollAnalysis(data.job_id);
                         } else {
-                            throw new Error(data.error || "Analysis failed to start");
+                            throw new Error(data.error || "Failed to start analysis");
                         }
                     } catch (e) {
                         analysisState.value.status = 'error';
                         showToast(e.message, 'error');
                     }
-                };
-
-                const pollAnalysis = (jobId) => {
-                    const interval = setInterval(async () => {
-                        // Stop if user switched collections or tab or job changed
-                        if(analysisState.value.jobId !== jobId) { clearInterval(interval); return; }
-
-                        try {
-                            const res = await fetch(`api/analysis/${jobId}`);
-                            const data = await res.json();
-
-                            if (data.status === 'completed') {
-                                clearInterval(interval);
-                                exploreData.value = data.data; // { clusters, points }
-                                analysisState.value.status = 'completed';
-                                analysisState.value.hasData = true;
-                                nextTick(() => renderChart());
-                                showToast("Analysis Complete!");
-                            } else if (data.status === 'failed') {
-                                clearInterval(interval);
-                                analysisState.value.status = 'error';
-                                showToast("Analysis Job Failed", "error");
-                            }
-                        } catch(e) {
-                            clearInterval(interval);
-                            console.error(e);
-                        }
-                    }, 2000);
                 };
 
                 const renderChart = () => {
