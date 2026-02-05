@@ -247,6 +247,43 @@ class VectorStorageEngine:
         except queue.Full:
             return False
 
+    def exists_batch(self, collection_name: str, doc_ids: List[str], include_pending: bool = False) -> Dict[str, bool]:
+        status = self.exists_batch_status(collection_name, doc_ids)
+        if include_pending:
+            return {d: (s in ("present", "pending")) for d, s in status.items()}
+        else:
+            return {d: (s == "present") for d, s in status.items()}
+
+    def exists_batch_status(self, collection_name: str, doc_ids: List[str]) -> Dict[str, str]:
+        """
+        Returns tri-state: 'present' | 'pending' | 'missing'
+        - present: persisted in DB
+        - pending: queued/in-flight in memory
+        - missing: neither persisted nor pending
+        """
+        if not self.is_ready():
+            raise RuntimeError("Engine not ready")
+
+        repo = self.ensure_repository(collection_name)
+
+        # 1) persisted check (DB)
+        persisted = repo.exists_batch(doc_ids)  # bool map via chunk_id
+
+        # 2) pending check (in-memory)
+        with self._pending_lock:
+            pending_set = set(self._pending.get(collection_name, set()))
+
+        # 3) merge into tri-state
+        out = {}
+        for d in doc_ids:
+            if persisted.get(d, False):
+                out[d] = "present"
+            elif d in pending_set:
+                out[d] = "pending"
+            else:
+                out[d] = "missing"
+        return out
+
     def get_queue_status(self):
         return {
             "qsize": self._queue.qsize(),

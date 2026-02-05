@@ -258,16 +258,41 @@ class VectorDBService:
 
         @route("/api/collections/<name>/documents/<doc_id>/exists", methods=["GET"])
         def check_document_exists(name, doc_id):
+            """
+            - Default: exists means PRESENT in DB (persisted)
+            - Optional: include_pending=1 counts queued/in-flight as exists too
+            - Also returns tri-state: state = present|pending|missing (recommended)
+            """
             try:
-                repo = get_repo_strict(name)
+                # Ensure engine/collection ready
+                get_repo_strict(name)
 
-                # Use the repo's exists method for single document check
-                exists = repo.exists(doc_id)
+                include_pending = request.args.get("include_pending", "0") in ("1", "true", "True")
+
+                # Prefer engine-level tri-state if available
+                if hasattr(self.engine, "exists_batch_status"):
+                    state_map = self.engine.exists_batch_status(name, [doc_id])
+                    state = state_map.get(doc_id, "missing")
+                else:
+                    # persisted-only using repo (older engine)
+                    repo = self.engine.get_repository(name)
+                    if not repo:
+                        raise ValueError(f"Collection '{name}' not found.")
+                    persisted = repo.exists(doc_id)
+                    state = "present" if persisted else "missing"
+
+                # define exists bool based on include_pending
+                if include_pending:
+                    exists = state in ("present", "pending")
+                else:
+                    exists = (state == "present")
 
                 return jsonify({
                     "collection": name,
                     "doc_id": doc_id,
-                    "exists": exists
+                    "exists": exists,   # backward compatible
+                    "state": state,     # tri-state
+                    "include_pending": include_pending
                 })
 
             except ValueError as e:
@@ -280,39 +305,54 @@ class VectorDBService:
 
         @route("/api/collections/<name>/exists", methods=["POST"])
         def check_documents_exist(name):
+            """
+            - Default: exists_map means PRESENT in DB (persisted)
+            - Optional: include_pending=true counts queued/in-flight as exists too
+            - Also returns states_map: doc_id -> present|pending|missing
+            """
             try:
                 data = request.json or {}
                 doc_ids = data.get("doc_ids", [])
+                include_pending = bool(data.get("include_pending", False))
 
-                # Validate input
+                # Validation (mostly unchanged)
                 if not doc_ids:
-                    return jsonify({
-                        "error": "doc_ids field is required and cannot be empty"
-                    }), 400
-
+                    return jsonify({"error": "doc_ids field is required and cannot be empty"}), 400
                 if not isinstance(doc_ids, list):
-                    return jsonify({
-                        "error": "doc_ids must be a list of document IDs"
-                    }), 400
-
-                # Check for non-string values in the list
-                invalid_ids = [doc_id for doc_id in doc_ids if not isinstance(doc_id, str)]
+                    return jsonify({"error": "doc_ids must be a list of document IDs"}), 400
+                invalid_ids = [d for d in doc_ids if not isinstance(d, str)]
                 if invalid_ids:
-                    return jsonify({
-                        "error": f"All document IDs must be strings. Invalid IDs: {invalid_ids}"
-                    }), 400
+                    return jsonify({"error": f"All document IDs must be strings. Invalid IDs: {invalid_ids}"}), 400
 
-                repo = get_repo_strict(name)
+                # Ensure ready/collection exists (unchanged)
+                get_repo_strict(name)
 
-                # Use the repo's exists_batch method for efficient batch checking
-                # Ensure the repo has this method (should be implemented in VectorCollectionRepo)
-                exists_map = repo.exists_batch(doc_ids)
+                # Prefer engine-level tri-state if available
+                if hasattr(self.engine, "exists_batch_status"):
+                    states_map = self.engine.exists_batch_status(name, doc_ids)
+                else:
+                    # persisted-only using repo (older engine)
+                    repo = self.engine.get_repository(name)
+                    if not repo:
+                        raise ValueError(f"Collection '{name}' not found.")
+                    persisted_map = repo.exists_batch(doc_ids)
+                    states_map = {d: ("present" if persisted_map.get(d, False) else "missing") for d in doc_ids}
+
+                # Build exists_map based on include_pending
+                if include_pending:
+                    exists_map = {d: (states_map.get(d) in ("present", "pending")) for d in doc_ids}
+                else:
+                    exists_map = {d: (states_map.get(d) == "present") for d in doc_ids}
 
                 return jsonify({
                     "collection": name,
-                    "exists_map": exists_map,
+                    "include_pending": include_pending,
+                    "exists_map": exists_map,  # backward compatible
+                    "states_map": states_map,
                     "total_checked": len(doc_ids),
-                    "total_exists": sum(1 for exists in exists_map.values() if exists)
+                    "total_exists": sum(1 for v in exists_map.values() if v),
+                    "total_present": sum(1 for s in states_map.values() if s == "present"),
+                    "total_pending": sum(1 for s in states_map.values() if s == "pending"),
                 })
 
             except ValueError as e:

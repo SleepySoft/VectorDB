@@ -408,71 +408,78 @@ class RemoteCollection:
         res = self._handle_response(resp)
         return res.get("status") == "cleared"
 
-    def exists(self, doc_id: str, **kwargs) -> bool:
+
+    def exists(self, doc_id: str, include_pending: bool = False, **kwargs) -> bool:
         """
-        Check if a single document exists in the collection.
-
-        This method performs a lightweight existence check for a single document.
-        It's more efficient than fetching the entire document when you only need
-        to know if it exists.
-
-        Args:
-            doc_id: Document ID to check
-            **kwargs: Additional arguments including 'timeout' for operation timeout
-
-        Returns:
-            Boolean indicating whether the document exists
-
-        Raises:
-            AuthenticationError: If authentication fails
-            InvalidRequestError: If collection doesn't exist or invalid parameters
-            ServerBusyError: If server is busy (can be retried)
-            ServerInitializingError: If server is still initializing
-            VectorDBTimeoutError: If operation times out
+        - include_pending: if True, treat 'pending' as exists=True
+        - still returns bool for backward compatibility
         """
-        # Use the retry decorator to handle timeouts and retries
-        return self._exists_impl(doc_id, **kwargs)
+        return self._exists_impl(doc_id, include_pending=include_pending, **kwargs)
+
+    def exists_batch(self, doc_ids: List[str], include_pending: bool = False, **kwargs) -> Dict[str, bool]:
+        return self._exists_batch_impl(doc_ids, include_pending=include_pending, **kwargs)
+
+    def exists_state(self, doc_id: str, **kwargs) -> str:
+        """
+        Returns tri-state from server: 'present' | 'pending' | 'missing'
+        (If server doesn't support it, fallback to 'present'/'missing')
+        """
+        return self._exists_state_impl(doc_id, **kwargs)
 
     @retry_with_timeout(default_timeout=30.0)
-    def _exists_impl(self, doc_id: str, **kwargs) -> bool:
-        """Internal implementation of exists with retry logic."""
+    def _exists_impl(self, doc_id: str, include_pending: bool = False, **kwargs) -> bool:
+        """
+        - pass include_pending to server via query param
+        - interpret response:
+            - prefer 'state' if present
+            - fallback to 'exists' if older server
+        """
         url = f"{self.api_url}/documents/{doc_id}/exists"
-        resp = requests.get(url, timeout=5)
-        return self._handle_response(resp).get("exists", False)
+        params = {"include_pending": "1" if include_pending else "0"}
+        resp = requests.get(url, params=params, timeout=5)
 
-    def exists_batch(self, doc_ids: List[str], **kwargs) -> Dict[str, bool]:
-        """
-        Batch check existence of multiple documents in the collection.
+        data = self._handle_response(resp)
 
-        This method is more efficient than checking documents one by one when
-        you need to verify the existence of multiple documents. It returns a
-        dictionary mapping each document ID to its existence status.
+        # prefer tri-state
+        state = data.get("state")
+        if state:
+            if include_pending:
+                return state in ("present", "pending")
+            return state == "present"
 
-        Args:
-            doc_ids: List of document IDs to check
-            **kwargs: Additional arguments including 'timeout' for operation timeout
-
-        Returns:
-            Dictionary mapping document IDs to boolean existence status
-
-        Raises:
-            AuthenticationError: If authentication fails
-            InvalidRequestError: If collection doesn't exist or invalid parameters
-            ServerBusyError: If server is busy (can be retried)
-            ServerInitializingError: If server is still initializing
-            VectorDBTimeoutError: If operation times out
-
-        Example:
-            >> collection.exists_batch(["doc1", "doc2", "doc3"])
-            {"doc1": True, "doc2": False, "doc3": True}
-        """
-        # Use the retry decorator to handle timeouts and retries
-        return self._exists_batch_impl(doc_ids, **kwargs)
+        # older server only returns exists bool
+        return bool(data.get("exists", False))
 
     @retry_with_timeout(default_timeout=30.0)
-    def _exists_batch_impl(self, doc_ids: List[str], **kwargs) -> Dict[str, bool]:
-        """Internal implementation of exists_batch with retry logic."""
+    def _exists_batch_impl(self, doc_ids: List[str], include_pending: bool = False, **kwargs) -> Dict[str, bool]:
         url = f"{self.api_url}/exists"
-        payload = {"doc_ids": doc_ids}
+        payload = {"doc_ids": doc_ids, "include_pending": bool(include_pending)}
         resp = requests.post(url, json=payload, timeout=5)
-        return self._handle_response(resp).get("exists_map", {})
+
+        data = self._handle_response(resp)
+
+        if "exists_map" in data:
+            return data.get("exists_map", {})
+
+        states_map = data.get("states_map", {}) or {}
+        if include_pending:
+            return {d: (states_map.get(d) in ("present", "pending")) for d in doc_ids}
+        return {d: (states_map.get(d) == "present") for d in doc_ids}
+
+    @retry_with_timeout(default_timeout=30.0)
+    def _exists_state_impl(self, doc_id: str, **kwargs) -> str:
+        """
+        Ask server for tri-state. If not available, fallback using exists.
+        """
+        url = f"{self.api_url}/documents/{doc_id}/exists"
+        # tri-state doesn't require include_pending; ask strict by default
+        resp = requests.get(url, params={"include_pending": "0"}, timeout=5)
+
+        data = self._handle_response(resp)
+
+        if "state" in data:
+            return data["state"]
+
+        # map bool -> state
+        return "present" if data.get("exists", False) else "missing"
+
