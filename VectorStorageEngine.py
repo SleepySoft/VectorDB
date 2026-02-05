@@ -66,6 +66,10 @@ class VectorStorageEngine:
         # For now, just keep it, but be aware of memory if collections are infinite.
         self._repos = {}
 
+        self._pending = {}  # {collection_name: set(doc_id)}
+        self._failed = {}   # {collection_name: {doc_id: "err"}}
+        self._pending_lock = threading.RLock()
+
         # --- Async Task Queue Setup ---
         self._queue = queue.Queue(maxsize=100)  # Limit queue to prevent OOM on backlog
         self._worker_thread = None
@@ -110,6 +114,14 @@ class VectorStorageEngine:
                 self._status = VectorStorageEngine.Status.ERROR
                 self._error_message = str(e)
                 # We do NOT set the ready event, so waiters will timeout or handle status manually
+
+    def stop_worker(self, wait: bool = True, timeout: float = 10.0):
+        """
+        Gracefully stop background worker thread.
+        """
+        self._stop_worker.set()
+        if self._worker_thread and wait:
+            self._worker_thread.join(timeout=timeout)
 
     # --- Worker Logic ---
 
@@ -157,9 +169,28 @@ class VectorStorageEngine:
         # Ensure repo exists (thread-safe)
         repo = self.ensure_repository(collection_name)
 
-        # Perform the heavy lifting
-        repo.upsert_document(doc_id, text, metadata)
-        # logger.info(f"Async Upsert Completed: {doc_id} in {collection_name}")
+        try:
+            # Perform the heavy lifting
+            repo.upsert_document(doc_id, text, metadata)
+
+            # Too much print
+            # logger.info(f"Async Upsert Completed: {doc_id} in {collection_name}")
+
+            # On success -> remove from pending
+            with self._pending_lock:
+                s = self._pending.get(collection_name)
+                if s:
+                    s.discard(doc_id)
+
+        except Exception as e:
+            # On failure -> remove pending + record failed (optional)
+            with self._pending_lock:
+                s = self._pending.get(collection_name)
+                if s:
+                    s.discard(doc_id)
+                self._failed.setdefault(collection_name, {})[doc_id] = str(e)
+
+            raise  # let outer log it
 
     def submit_upsert(self, collection_name: str, doc_id: str, text: str, metadata: Dict = None) -> bool:
         """
@@ -179,6 +210,14 @@ class VectorStorageEngine:
 
         try:
             self._queue.put(task, block=False)
+
+            # Only mark pending after actually queued
+            with self._pending_lock:
+                self._pending.setdefault(collection_name, set()).add(doc_id)
+                # Optional: clear previous failed mark
+                if collection_name in self._failed:
+                    self._failed[collection_name].pop(doc_id, None)
+
             return True
         except queue.Full:
             logger.warning("Task queue is full! Dropping request.")
@@ -195,6 +234,15 @@ class VectorStorageEngine:
 
         try:
             self._queue.put(batch_task, block=True, timeout=5)
+
+            with self._pending_lock:
+                for item in tasks:
+                    c = item["collection_name"]
+                    d = item["doc_id"]
+                    self._pending.setdefault(c, set()).add(d)
+                    if c in self._failed:
+                        self._failed[c].pop(d, None)
+
             return True
         except queue.Full:
             return False
@@ -215,19 +263,19 @@ class VectorStorageEngine:
         }
 
     def is_ready(self) -> bool:
-        return self._status == "ready"
+        return self._status == VectorStorageEngine.Status.READY
 
     def wait_until_ready(self, timeout: float = None) -> bool:
         """
         Blocks until the engine is ready.
         Returns True if ready, False if timed out or errored.
         """
-        if self._status == "ready":
+        if self._status == VectorStorageEngine.Status.READY:
             return True
-        if self._status == "error":
+        if self._status == VectorStorageEngine.Status.ERROR:
             return False
-
-        return self._ready_event.wait(timeout=timeout)
+        ok = self._ready_event.wait(timeout=timeout)
+        return ok and (self._status == VectorStorageEngine.Status.READY)
 
     def ensure_repository(self, collection_name: str, chunk_size: int = 512,
                           chunk_overlap: int = 50) -> "VectorCollectionRepo":
@@ -351,6 +399,11 @@ class VectorStorageEngine:
         with self._lock:
             logger.info("Starting Restore... Service locked.")
             try:
+                # 0. Mark status as INIT during restore
+                self._status = VectorStorageEngine.Status.INIT
+                self._error_message = None
+                self._ready_event.clear()
+
                 # 1. Unload resources to release file locks
                 self._repos.clear()  # Clear repo cache
                 del self._client  # Remove reference
@@ -374,6 +427,11 @@ class VectorStorageEngine:
                 # 4. Reload Client
                 import chromadb
                 self._client = chromadb.PersistentClient(path=self._db_path)
+
+                # Restore success -> READY
+                self._status = VectorStorageEngine.Status.READY
+                self._error_message = None
+                self._ready_event.set()
 
                 logger.info("Client re-initialized. Restore Complete.")
 
@@ -412,7 +470,7 @@ class VectorCollectionRepo:
         self._model = model
         self._collection_name = collection_name
         self._current_config = {}
-        self._text_splitter = Optional[RecursiveCharacterTextSplitter]
+        self._text_splitter: Optional[RecursiveCharacterTextSplitter] = None
 
         # Get or create the actual Chroma collection
         self._collection = self._client.get_or_create_collection(
@@ -539,43 +597,27 @@ class VectorCollectionRepo:
         Raises:
             ValueError: If doc_ids is empty or not a valid type.
         """
-        from typing import Union, List, Dict
-
-        # Convert single ID to list for uniform processing
+        # Normalize input
         if isinstance(doc_ids, str):
             doc_ids = [doc_ids]
         elif not isinstance(doc_ids, list) or not doc_ids:
             raise ValueError("doc_ids must be a non-empty string or list of strings")
 
-        # Early return for empty list (though should be caught above)
-        if not doc_ids:
-            return {}
+        # Existence check via chunk_0 ids
+        chunk0_ids = [f"{doc_id}#chunk_0" for doc_id in doc_ids]
 
-        # Use ChromaDB's get method with 'in' operator to batch query
-        # $in operator allows checking multiple values for a metadata field
         try:
-            result = self._collection.get(
-                where={"original_doc_id": {"$in": doc_ids}},
-                limit=len(doc_ids) * 100,  # Large limit to get all chunks
-                include=[],  # We only need existence, not data
-                # Use distinct to get unique document IDs for efficiency
-                # where_document is None because we don't filter by document content
-            )
+            # Only need ids, so include can be empty
+            # ids are always returned by Chroma get()
+            #   [1](https://docs.trychroma.com/reference/python/collection)
+            result = self._collection.get(ids=chunk0_ids, include=[])
+            found_ids = set(result.get("ids") or [])
         except Exception as e:
-            logger.error(f"Batch existence check failed: {e}")
-            # Fallback: return all False on error
+            logger.error(f"Batch existence check failed (chunk-id strategy): {e}")
             return {doc_id: False for doc_id in doc_ids}
 
-        # Extract unique document IDs from the results
-        # We need to check metadata for original_doc_id
-        existing_ids = set()
-        if result.get('metadatas'):
-            for metadata in result['metadatas']:
-                if metadata and 'original_doc_id' in metadata:
-                    existing_ids.add(metadata['original_doc_id'])
-
-        # Build result dictionary
-        return {doc_id: (doc_id in existing_ids) for doc_id in doc_ids}
+        # Map back to doc_id
+        return {doc_id: (f"{doc_id}#chunk_0" in found_ids) for doc_id in doc_ids}
 
     def delete_document(self, doc_id: str) -> bool:
         """
@@ -608,7 +650,9 @@ class VectorCollectionRepo:
         Returns:
             List[Dict]: List of result objects containing doc_id, score, text, metadata.
         """
-        query_vector = self._vectorize(query_text).tolist()
+
+        # Ensure _vectorize receives List[str], and we extract the first vector
+        query_vector = self._vectorize([query_text])[0].tolist()
 
         # Request more chunks than top_n because multiple chunks might come from same doc
         fetch_k = top_n * 3

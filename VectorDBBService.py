@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 import uuid
 import logging
 import argparse
@@ -654,7 +655,7 @@ class VectorDBService:
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     # --- Configuration Logic ---
     parser = argparse.ArgumentParser(description="VectorDB Standalone Service")
 
@@ -702,3 +703,11 @@ if __name__ == "__main__":
 
     # 3. Run Standalone
     service.run_standalone(host=args.host, port=args.port, debug=False)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(str(e))
+        traceback.print_exc()
