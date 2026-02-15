@@ -99,11 +99,16 @@ class CircuitBreaker:
 
 def retry_with_timeout(default_timeout: float = 60.0, max_retries: int = -1):
     """
-    Decorator that retries the function until success or until 'timeout' expires.
+    Decorator that implements an exponential backoff retry strategy with a global time budget.
+
+    It specifically handles `ServerBusyError`, `ServerInitializingError`, and network-level
+    exceptions, while letting logical errors (Auth, Bad Request) pass through immediately.
 
     Args:
-        default_timeout: The default total time (in seconds) allowed for the operation.
-        max_retries: The max retries. -1 means retry forever.
+        default_timeout (float): The total time budget (in seconds) allowed for the operation
+                                 before raising a VectorDBTimeoutError.
+        max_retries (int): Maximum number of retry attempts. -1 implies infinite retries
+                           within the timeout budget.
     """
 
     def decorator(func):
@@ -169,15 +174,29 @@ def retry_with_timeout(default_timeout: float = 60.0, max_retries: int = -1):
 
 class VectorDBClient:
     """
-    A Python client for the standalone VectorDB Service.
+    A robust Python client for the standalone VectorDB Service.
+
+    This client manages the connection lifecycle, health checks, and collection creation.
+    It includes a Circuit Breaker pattern to prevent cascading failures when the
+    service is unavailable.
     """
 
     def __init__(self, base_url: str = "http://localhost:8001"):
+        """
+        Args:
+            base_url (str): The root URL of the VectorDB service.
+        """
         self.base_url = base_url.rstrip("/")
         self._circuit_breaker = CircuitBreaker()  # Instance-level circuit breaker
 
     def get_status(self) -> Dict[str, Any]:
-        """Check the raw status of the server."""
+        """
+        Retrieves the raw status JSON from the service.
+
+        Returns:
+            Dict[str, Any]: Service status info (e.g., {"status": "ready", "model": "..."}).
+                            Returns {"status": "unreachable"} on connection failure.
+        """
         try:
             resp = requests.get(f"{self.base_url}/api/status", timeout=5)
             resp.raise_for_status()
@@ -196,10 +215,23 @@ class VectorDBClient:
 
     def wait_until_ready(self, timeout: float = 60.0, poll_interval: float = 2.0) -> bool:
         """
-        Blocks until the VectorDB service is fully initialized and ready.
+        Blocks execution until the VectorDB service reports a 'ready' status.
+
+        This handles the 'initializing' state (e.g., loading heavy ML models) by polling.
+
+        Args:
+            timeout (float): Max wait time in seconds.
+            poll_interval (float): Seconds between status checks.
+
+        Returns:
+            bool: True if service is ready.
+
+        Raises:
+            TimeoutError: If the service is not ready within the timeout.
+            VectorDBInitializationError: If the service reports an explicit internal error.
         """
         start_time = time.time()
-        print(f"[Client] Waiting for VectorDB at {self.base_url} (Timeout: {timeout}s)...")
+        # print(f"[Client] Waiting for VectorDB at {self.base_url} (Timeout: {timeout}s)...")
 
         while True:
             if (time.time() - start_time) > timeout:
@@ -237,7 +269,21 @@ class VectorDBClient:
     def create_collection(self, name: str, chunk_size: int = 512,
                           chunk_overlap: int = 50, **kwargs) -> "RemoteCollection":
         """
-        Enhanced create_collection with circuit breaker and retry limits.
+        Creates a new collection or updates the config of an existing one.
+
+        Protected by a Circuit Breaker to fail fast if the service is down.
+
+        Args:
+            name (str): Unique collection identifier.
+            chunk_size (int): Token limit for text chunks.
+            chunk_overlap (int): Overlap between chunks.
+            **kwargs: Additional configuration parameters.
+
+        Returns:
+            RemoteCollection: A handle to operate on the collection.
+
+        Raises:
+            ServerBusyError: If the circuit breaker is open.
         """
         if not self._circuit_breaker.can_execute():
             raise ServerBusyError("Circuit breaker is OPEN, rejecting request")
@@ -294,6 +340,13 @@ class VectorDBClient:
 
 
 class RemoteCollection:
+    """
+    Represents a specific collection on the remote VectorDB service.
+
+    Provides methods to index (upsert), search, and manage documents.
+    Most operations support automatic retries for transient server errors.
+    """
+
     def __init__(self, base_url: str, name: str):
         self.api_url = f"{base_url}/api/collections/{name}"
         self.name = name
@@ -338,17 +391,19 @@ class RemoteCollection:
     @retry_with_timeout(default_timeout=120.0)  # Default 2 minutes total retry
     def upsert(self, doc_id: str, text: str, metadata: Dict[str, Any] = None, **kwargs) -> Dict:
         """
-        Upserts a document.
+        Enqueues a single document for indexing.
+
+        Note: This operation is ASYNCHRONOUS. A successful return (HTTP 202) means
+        the document has been queued, not necessarily indexed.
+
         Args:
-            doc_id:
-            text:
-            metadata:
-            timeout (float): Total duration (in seconds) to keep retrying if server is busy.
-                             If not provided, defaults to 120s.
-            max_retries:
+            doc_id (str): Unique document identifier (e.g., UUID).
+            text (str): The raw text content to be embedded.
+            metadata (Dict): Associated metadata for filtering.
+            timeout (float, optional): Override default retry timeout (default: 120s).
+
         Returns:
-            Dict: {'status': 'queued', 'message': '...', 'doc_id': '...'}
-                  The operation is NOT finished when this returns.
+            Dict: Response payload, typically {'status': 'queued', 'doc_id': ...}
         """
         if metadata is None: metadata = {}
         payload = {"doc_id": doc_id, "text": text, "metadata": metadata}
@@ -365,7 +420,15 @@ class RemoteCollection:
     @retry_with_timeout(default_timeout=120.0)
     def upsert_batch(self, documents: List[Dict], **kwargs) -> Dict:
         """
-        documents: List of {"doc_id": str, "text": str, "metadata": dict}
+        Enqueues a batch of documents for indexing.
+
+        More efficient than single upserts due to reduced network overhead.
+
+        Args:
+            documents (List[Dict]): List of dicts, each containing {"doc_id", "text", "metadata"}.
+
+        Returns:
+            Dict: Response payload indicating queue status.
         """
         resp = requests.post(f"{self.api_url}/upsert_batch", json=documents)
         if resp.status_code == 202:
@@ -379,7 +442,18 @@ class RemoteCollection:
             score_threshold: float = 0.0,
             filter_criteria: Optional[Dict] = None
     ) -> List[Dict]:
-        """Searches the remote DB."""
+        """
+        Performs a semantic similarity search.
+
+        Args:
+            query (str): The natural language query.
+            top_n (int): Max number of results to return.
+            score_threshold (float): Minimum similarity score (0.0 to 1.0) to include.
+            filter_criteria (Dict, optional): Metadata filters (e.g., {"category": "news"}).
+
+        Returns:
+            List[Dict]: A list of results, sorted by relevance score.
+        """
         payload = {
             "query": query,
             "top_n": top_n,
@@ -417,6 +491,18 @@ class RemoteCollection:
         return self._exists_impl(doc_id, include_pending=include_pending, **kwargs)
 
     def exists_batch(self, doc_ids: List[str], include_pending: bool = False, **kwargs) -> Dict[str, bool]:
+        """
+        Checks the existence of multiple documents.
+
+        Args:
+            doc_ids (List[str]): List of document IDs to check.
+            include_pending (bool): If True, returns True for documents that are currently
+                                    in the processing queue but not yet indexed.
+                                    Essential for avoiding duplicates during incremental builds.
+
+        Returns:
+            Dict[str, bool]: Mapping of doc_id to existence status.
+        """
         return self._exists_batch_impl(doc_ids, include_pending=include_pending, **kwargs)
 
     def exists_state(self, doc_id: str, **kwargs) -> str:
