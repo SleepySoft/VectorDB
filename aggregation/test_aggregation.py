@@ -42,6 +42,16 @@ def get_ts_stats():
     return j
 
 
+def wait_queue_empty(timeout=60):
+    start = time.time()
+    while time.time() - start < timeout:
+        r = requests.get(f"{BASE}/api/status/queue", timeout=5).json()
+        if r.get("qsize", 0) == 0:
+            return True
+        time.sleep(1)
+    return False
+
+
 # def get_ts_stats():
 #     url = f"{BASE}/api/collections/{COLLECTION}/timestamp_stats"
 #     r = requests.get(url, params={"time_field": TIME_FIELD, "scan_limit": 20000}, timeout=10)
@@ -110,6 +120,7 @@ def main():
     if max_ts is None:
         print("[INFO] No timestamp found, inserting dummy docs...")
         insert_dummy_docs()
+        wait_queue_empty()
         stats = get_ts_stats()
         max_ts = stats.get("max_ts")
 

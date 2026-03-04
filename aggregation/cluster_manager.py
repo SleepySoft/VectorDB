@@ -29,7 +29,7 @@ class OfflineRunner(Protocol):
     - persist results if plan.persist
     - return a version identifier and summary
     """
-    def run(self, plan: AggregationPlan) -> Dict[str, Any]:
+    def run(self, plan: AggregationPlan, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ...
 
 
@@ -293,7 +293,8 @@ class ClusterManager:
 
         try:
             # Execute offline runner
-            result = self._offline_runner.run(plan)  # must return dict
+            overrides = job.get("overrides") or {}
+            result = self._offline_runner.run(plan, overrides=overrides)  # must return dict
 
             version = result.get("version")
             with self._lock:
@@ -340,26 +341,26 @@ class ClusterManager:
 
 # Just for quick test.
 
-class OfflineRunnerStub:
-    def __init__(self, engine):
-        self.engine = engine
-
-    def run(self, plan: AggregationPlan) -> Dict[str, Any]:
-        # TODO: 以后替换为真实实现：
-        # 1) repo.prepare_article_matrix(...)
-        # 2) run hdbscan/dbscan/agglomerative_threshold
-        # 3) persist mapping/meta/centroids
-        version = time.strftime("%Y%m%d_%H%M%S")
-        return {
-            "plan_id": plan.plan_id,
-            "collection_name": plan.collection_name,
-            "version": version,
-            "summary": {
-                "method": plan.method,
-                "params": plan.params,
-                "note": "stub result, no actual clustering executed"
-            }
-        }
-
-def offline_runner_factory(engine):
-    return OfflineRunnerStub(engine)
+# class OfflineRunnerStub:
+#     def __init__(self, engine):
+#         self.engine = engine
+#
+#     def run(self, plan: AggregationPlan) -> Dict[str, Any]:
+#         # TODO: 以后替换为真实实现：
+#         # 1) repo.prepare_article_matrix(...)
+#         # 2) run hdbscan/dbscan/agglomerative_threshold
+#         # 3) persist mapping/meta/centroids
+#         version = time.strftime("%Y%m%d_%H%M%S")
+#         return {
+#             "plan_id": plan.plan_id,
+#             "collection_name": plan.collection_name,
+#             "version": version,
+#             "summary": {
+#                 "method": plan.method,
+#                 "params": plan.params,
+#                 "note": "stub result, no actual clustering executed"
+#             }
+#         }
+#
+# def offline_runner_factory(engine):
+#     return OfflineRunnerStub(engine)

@@ -12,7 +12,10 @@ from flask import Flask, Blueprint, request, jsonify, send_file, Response
 
 from VectorDB.aggregation.plans import AggregationPlan
 from VectorDB.aggregation.registry import AggregationRegistry
-from VectorDB.aggregation.cluster_manager import ClusterManager, offline_runner_factory
+from VectorDB.aggregation.cluster_manager import ClusterManager
+from VectorDB.aggregation.offline_runner import OfflineClusterRunner
+from VectorDB.aggregation.persistence import InMemoryAggregationStore
+from VectorDB.aggregation.online_microcluster import OnlineMicroClusterManager
 
 # Import the core engine defined in the previous step
 try:
@@ -804,6 +807,17 @@ class VectorDBService:
 
 # ----------------------------------------------------------------------------------------------------------------------
 
+store = InMemoryAggregationStore()
+
+
+def offline_runner_factory(engine):
+    return OfflineClusterRunner(engine, store)
+
+
+def online_handler_factory(engine, plan):
+    return OnlineMicroClusterManager(engine, plan, store)
+
+
 def main():
     # --- Configuration Logic ---
     parser = argparse.ArgumentParser(description="VectorDB Standalone Service")
@@ -853,7 +867,7 @@ def main():
         engine=engine_instance,
         registry=registry,
         offline_runner_factory=offline_runner_factory,
-        online_handler_factory=None,
+        online_handler_factory=online_handler_factory,
         max_workers=2
     )
 

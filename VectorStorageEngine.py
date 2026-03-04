@@ -905,7 +905,7 @@ class VectorCollectionRepo:
             results = self._collection.get(
                 limit=scan_limit,
                 offset=offset,
-                include=["metadatas", "ids"]
+                include=["metadatas"]
             )
             metas = results.get("metadatas") or []
             min_ts, max_ts = None, None
