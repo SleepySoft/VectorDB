@@ -10,6 +10,9 @@ from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, request, jsonify, send_file, Response
 
+from VectorDB.aggregation.plans import AggregationPlan
+from VectorDB.aggregation.registry import AggregationRegistry
+from VectorDB.aggregation.cluster_manager import ClusterManager, offline_runner_factory
 
 # Import the core engine defined in the previous step
 try:
@@ -51,13 +54,18 @@ class VectorDBService:
     3. Can run standalone or mount onto an existing Flask app.
     """
 
-    def __init__(self, engine: VectorStorageEngine, frontend_filename: str = "VectorDBFrontend.html"):
+    def __init__(self,
+                 engine: VectorStorageEngine,
+                 frontend_filename: str = "VectorDBFrontend.html",
+                 cluster_mgr: Optional[ClusterManager]=None
+                 ):
         """
         Args:
             engine (VectorStorageEngine): The initialized storage engine instance.
             frontend_filename (str): The HTML file name located in the same directory.
         """
         self.engine = engine
+        self.cluster_mgr = cluster_mgr
         self.frontend_filename = frontend_filename
         self._is_registered = False
 
@@ -67,6 +75,7 @@ class VectorDBService:
 
         self._analysis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AnalysisWorker")
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
+        self._aggregation_jobs: Dict[str, Dict[str, Any]] = {}
 
         self.metrics = {
             'service_unavailable_count': 0,
@@ -628,6 +637,104 @@ class VectorDBService:
                     "message": "Calculation in progress..."
                 }), 200
 
+        @route("/api/aggregation/plans", methods=["GET"])
+        def list_aggregation_plans():
+            if not self.cluster_mgr:
+                return jsonify({"error": "ClusterManager not configured"}), 501
+            plans = [p.__dict__ for p in self.cluster_mgr.list_plans()]
+            return jsonify({"plans": plans})
+
+        @route("/api/aggregation/plans", methods=["POST"])
+        def register_aggregation_plan():
+            if not self.cluster_mgr:
+                return jsonify({"error": "ClusterManager not configured"}), 501
+            data = request.json or {}
+            try:
+                from VectorDB.aggregation.plans import AggregationPlan  # adjust import based on your layout
+            except Exception:
+                from aggregation.plans import AggregationPlan
+
+            plan = AggregationPlan(
+                plan_id=data["plan_id"],
+                collection_name=data["collection_name"],
+                time_window_sec=int(data.get("time_window_sec", 24 * 3600)),
+                run_every_sec=int(data.get("run_every_sec", 3600)),
+                filter_criteria=data.get("filter_criteria", {}),
+                limit=int(data.get("limit", 50000)),
+                max_points=int(data.get("max_points", 50000)),
+                method=data.get("method", "hdbscan"),
+                params=data.get("params", {}),
+                semantic_only=bool(data.get("semantic_only", True)),
+                enable_online=bool(data.get("enable_online", True)),
+                persist=bool(data.get("persist", True)),
+                time_field=data.get("time_field", "timestamp")
+            )
+
+            overwrite = bool(data.get("overwrite", False))
+            self.cluster_mgr.register_plan(plan, overwrite=overwrite)
+            return jsonify({"status": "success", "plan": plan.__dict__})
+
+        @route("/api/aggregation/plans/<plan_id>", methods=["DELETE"])
+        def delete_aggregation_plan(plan_id):
+            if not self.cluster_mgr:
+                return jsonify({"error": "ClusterManager not configured"}), 501
+            ok = self.cluster_mgr.unregister_plan(plan_id)
+            return jsonify({"status": "success" if ok else "not_found", "plan_id": plan_id}), (200 if ok else 404)
+
+        @route("/api/aggregation/plans/<plan_id>/run", methods=["POST"])
+        def run_aggregation_plan(plan_id):
+            """
+            Trigger offline aggregation.
+            Body optional:
+              {
+                "time_range": [start_ts, end_ts],
+                "overrides": {...}   # optional plan overrides
+              }
+            """
+            if not self.cluster_mgr:
+                return jsonify({"error": "ClusterManager not configured"}), 501
+
+            data = request.json or {}
+            overrides = data.get("overrides", {}) or {}
+
+            # allow passing time_range override for testing
+            time_range = data.get("time_range")
+            if time_range and isinstance(time_range, list) and len(time_range) == 2:
+                overrides["time_range"] = (float(time_range[0]), float(time_range[1]))
+
+            try:
+                # our ClusterManager override list does not include time_range directly;
+                # offline runner can read overrides["time_range"] from job metadata if you implement it that way.
+                # For now, we store it in overrides and pass to run_offline.
+                resp = self.cluster_mgr.run_offline(plan_id, async_run=True, overrides=overrides)
+                job_id = resp["job_id"]
+                return jsonify({"status": "accepted", "job_id": job_id}), 202
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        @route("/api/aggregation/jobs/<job_id>", methods=["GET"])
+        def get_aggregation_job(job_id):
+            if not self.cluster_mgr:
+                return jsonify({"error": "ClusterManager not configured"}), 501
+            job = self.cluster_mgr.get_job(job_id)
+            if not job:
+                return jsonify({"error": "Job not found"}), 404
+            return jsonify(job)
+
+        @route("/api/collections/<name>/timestamp_stats", methods=["GET"])
+        def collection_timestamp_stats(name):
+            """
+            Helper endpoint for tests: get min/max timestamp within a scan limit.
+            """
+            try:
+                repo = get_repo_strict(name)
+                time_field = request.args.get("time_field", "timestamp")
+                scan_limit = int(request.args.get("scan_limit", 20000))
+                stats = repo.timestamp_stats(time_field=time_field, scan_limit=scan_limit, offset=0)
+                return jsonify(stats)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
         return bp
 
     def _run_analysis_task(self, job_id: str, collection_name: str, config_payload: Dict[str, Any]):
@@ -740,8 +847,31 @@ def main():
         model_name=args.model
     )
 
+    registry = AggregationRegistry(max_plans=3, max_plans_per_collection=1)
+
+    cluster_mgr = ClusterManager(
+        engine=engine_instance,
+        registry=registry,
+        offline_runner_factory=offline_runner_factory,
+        online_handler_factory=None,
+        max_workers=2
+    )
+
+    # 注册一个 plan（仅绑定 collection，不关心里面是什么）
+    plan = AggregationPlan(
+        plan_id="agg_intelligence_summary_24h",
+        collection_name="intelligence_summary",
+        time_window_sec=24 * 3600,
+        run_every_sec=3600,
+        method="hdbscan",
+        params={"min_cluster_size": 3, "min_samples": 2},
+        max_points=50000,
+        enable_online=True,
+    )
+    cluster_mgr.register_plan(plan)
+
     # 2. Initialize Service
-    service = VectorDBService(engine=engine_instance)
+    service = VectorDBService(engine=engine_instance, cluster_mgr=cluster_mgr)
 
     # 3. Run Standalone
     service.run_standalone(host=args.host, port=args.port, debug=False)

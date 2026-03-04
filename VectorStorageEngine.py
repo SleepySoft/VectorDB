@@ -70,6 +70,11 @@ class VectorStorageEngine:
         self._failed = {}   # {collection_name: {doc_id: "err"}}
         self._pending_lock = threading.RLock()
 
+        # --- Event Bus (Upsert listeners) ---
+        # listeners will receive dict events, must be fast/non-blocking
+        self._listeners_lock = threading.RLock()
+        self._upsert_listeners = []  # List[Callable[[Dict[str, Any]], None]]
+
         # --- Async Task Queue Setup ---
         self._queue = queue.Queue(maxsize=100)  # Limit queue to prevent OOM on backlog
         self._worker_thread = None
@@ -159,6 +164,56 @@ class VectorStorageEngine:
                 # Optional: Force GC after heavy tasks if memory is tight
                 # gc.collect()
 
+    # ----------------------------
+    # Event Bus APIs
+    # ----------------------------
+
+    def register_upsert_listener(self, fn):
+        """
+        Register a listener callback: fn(event_dict) -> None
+        Listener MUST be non-blocking. If heavy work is needed, enqueue internally.
+        """
+        if fn is None:
+            return
+        with self._listeners_lock:
+            if fn not in self._upsert_listeners:
+                self._upsert_listeners.append(fn)
+
+    def unregister_upsert_listener(self, fn):
+        """Unregister a listener callback."""
+        if fn is None:
+            return
+        with self._listeners_lock:
+            try:
+                self._upsert_listeners.remove(fn)
+            except ValueError:
+                pass
+
+    def _emit_event(self, event: Dict[str, Any]):
+        """Internal: broadcast event to all listeners."""
+        with self._listeners_lock:
+            listeners = list(self._upsert_listeners)
+
+        for fn in listeners:
+            try:
+                fn(event)
+            except Exception as e:
+                logger.warning(f"Upsert listener error: {e}")
+
+    def _repo_embeddings_hook(self, **payload):
+        """
+        Internal hook passed to VectorCollectionRepo.upsert_document().
+        This converts payload to a single event dict and emits it.
+        """
+        event = {
+            "type": "doc_embeddings_ready",
+            "ts": time.time(),
+            **payload
+        }
+        # Emit event synchronously (listeners must be fast).
+        # If you want absolute isolation, you can enqueue to a small internal queue here.
+        self._emit_event(event)
+
     def _handle_upsert_task(self, task: Dict):
         """Process the upsert logic inside the worker thread."""
         collection_name = task["collection_name"]
@@ -170,17 +225,26 @@ class VectorStorageEngine:
         repo = self.ensure_repository(collection_name)
 
         try:
-            # Perform the heavy lifting
-            repo.upsert_document(doc_id, text, metadata)
-
-            # Too much print
-            # logger.info(f"Async Upsert Completed: {doc_id} in {collection_name}")
+            # Perform the heavy lifting (pass optional embeddings hook)
+            repo.upsert_document(
+                doc_id=doc_id,
+                text=text,
+                metadata=metadata,
+                on_embeddings=self._repo_embeddings_hook
+            )
 
             # On success -> remove from pending
             with self._pending_lock:
                 s = self._pending.get(collection_name)
                 if s:
                     s.discard(doc_id)
+
+            self._emit_event({
+                "type": "doc_upsert_done",
+                "ts": time.time(),
+                "collection_name": collection_name,
+                "doc_id": doc_id,
+            })
 
         except Exception as e:
             # On failure -> remove pending + record failed (optional)
@@ -190,7 +254,7 @@ class VectorStorageEngine:
                     s.discard(doc_id)
                 self._failed.setdefault(collection_name, {})[doc_id] = str(e)
 
-            raise  # let outer log it
+            raise
 
     def submit_upsert(self, collection_name: str, doc_id: str, text: str, metadata: Dict = None) -> bool:
         """
@@ -538,59 +602,93 @@ class VectorCollectionRepo:
         # If texts list is huge (e.g. 10k chunks), this processes them 32 at a time.
         return self._model.encode(texts, batch_size=32, show_progress_bar=False, convert_to_numpy=True)
 
-    def upsert_document(self, doc_id: str, text: str, metadata: Dict[str, Any] = None) -> List[str]:
+    def upsert_document(
+            self,
+            doc_id: str,
+            text: str,
+            metadata: Dict[str, Any] = None,
+            on_embeddings=None
+    ) -> List[str]:
         """
         Upserts a document: fully replaces any existing document with the same doc_id.
 
         CRITICAL: This method performs a "Delete-then-Insert" strategy.
         It first deletes ALL existing chunks associated with `doc_id` to ensure
-        no stale chunks remain (which happens if the new document is shorter than the old one).
+        no stale chunks remain.
 
         Args:
             doc_id (str): Unique identifier for the document.
             text (str): The full text content.
             metadata (Dict): Searchable metadata (e.g., {"timestamp": 123}).
+            on_embeddings (Callable): optional hook called after embeddings computed.
+                Signature: on_embeddings(**payload) or on_embeddings(payload_dict)
 
         Returns:
             List[str]: The list of generated chunk IDs.
         """
-        if not text: return []
-        if metadata is None: metadata = {}
+        if not text:
+            return []
+        if metadata is None:
+            metadata = {}
 
-        # 1. Delete old
+        # 1) Delete old
         try:
             self._collection.delete(where={"original_doc_id": doc_id})
         except Exception:
             pass
 
+        # 2) Clean metadata (keep your original behavior)
         clean_metadata = {}
         for k, v in metadata.items():
             if isinstance(v, (list, dict)):
-                # 如果是列表或字典，自动转 JSON 字符串
                 clean_metadata[k] = json.dumps(v, ensure_ascii=False)
             elif isinstance(v, (str, int, float, bool)):
-                # 基础类型直接存
                 clean_metadata[k] = v
             else:
-                # 其他类型（如 None）强制转字符串或丢弃
                 clean_metadata[k] = str(v)
 
-        # 2. Split
+        # 3) Split
         chunks = self._text_splitter.split_text(text)
-        if not chunks: return []
+        if not chunks:
+            return []
 
-        # 3. Prepare Data
+        # 4) Prepare IDs & metadatas
         chunk_ids = [f"{doc_id}#chunk_{i}" for i in range(len(chunks))]
         chunk_metadatas = []
         for i in range(len(chunks)):
-            meta = {"original_doc_id": doc_id, "chunk_index": i, "total_chunks": len(chunks)}
+            meta = {
+                "original_doc_id": doc_id,
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+            }
             meta.update(clean_metadata)
             chunk_metadatas.append(meta)
 
-        # 4. Vectorize (Optimized with batching)
-        embeddings = self._vectorize(chunks).tolist()
+        # 5) Vectorize (np.ndarray)
+        embeddings_np = self._vectorize(chunks)  # convert_to_numpy=True in _vectorize
+        # ---- NEW: emit hook BEFORE converting to list ----
+        if on_embeddings is not None:
+            try:
+                # Keep payload compact: do NOT always pass chunks (may be large)
+                payload = {
+                    "collection_name": self._collection_name,
+                    "doc_id": doc_id,
+                    "chunk_ids": chunk_ids,
+                    "embeddings": embeddings_np,  # np.ndarray
+                    "metadata": clean_metadata,
+                    "chunks_count": len(chunks),
+                }
+                # Support both fn(**kwargs) and fn(dict)
+                try:
+                    on_embeddings(**payload)
+                except TypeError:
+                    on_embeddings(payload)
+            except Exception as e:
+                logger.warning(f"[VectorRepo] on_embeddings hook failed: {e}")
 
-        # 5. Insert (Batch limit for ChromaDB limit is usually high, but can be chunked too if needed)
+        # 6) Insert (Chroma expects list)
+        embeddings = embeddings_np.tolist()
+
         MAX_BATCH = 5000
         for i in range(0, len(chunk_ids), MAX_BATCH):
             end = i + MAX_BATCH
@@ -796,6 +894,48 @@ class VectorCollectionRepo:
             "limit": limit,
             "offset": offset
         }
+
+    def timestamp_stats(self, time_field: str = "timestamp", scan_limit: int = 20000, offset: int = 0) -> Dict[
+        str, Any]:
+        """
+        Scan metadatas to compute min/max timestamp.
+        This is for testing & window selection. It does NOT assume semantics.
+        """
+        try:
+            results = self._collection.get(
+                limit=scan_limit,
+                offset=offset,
+                include=["metadatas", "ids"]
+            )
+            metas = results.get("metadatas") or []
+            min_ts, max_ts = None, None
+            cnt = 0
+            for m in metas:
+                if not m:
+                    continue
+                ts = m.get(time_field)
+                if ts is None:
+                    continue
+                try:
+                    ts = float(ts)
+                except Exception:
+                    continue
+                cnt += 1
+                min_ts = ts if (min_ts is None or ts < min_ts) else min_ts
+                max_ts = ts if (max_ts is None or ts > max_ts) else max_ts
+
+            return {
+                "time_field": time_field,
+                "min_ts": min_ts,
+                "max_ts": max_ts,
+                "count_scanned": len(metas),
+                "count_with_ts": cnt,
+                "offset": offset,
+                "scan_limit": scan_limit
+            }
+        except Exception as e:
+            logger.error(f"timestamp_stats failed: {e}")
+            return {"error": str(e), "time_field": time_field}
 
     def _extract_features(self,
                           metadatas: List[Dict],
