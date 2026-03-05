@@ -569,39 +569,100 @@
                                             <div class="text-xs text-gray-400 font-mono truncate">{{ selectedPlanId }}
                                             </div>
 
-                                            <!-- time_field + time_range compact row -->
-                                            <div class="mt-3 flex flex-wrap items-center gap-2">
+                                            <!-- time_field + time_range controls -->
+                                            <div class="mt-3 flex flex-col gap-2">
+
+                                              <!-- row 1: mode + preset -->
+                                              <div class="flex flex-wrap items-center gap-2">
+                                                <span class="text-xs text-gray-500 font-bold">Range</span>
+
+                                                <!-- mode toggle -->
+                                                <label class="text-xs flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
+                                                  <input type="radio" value="auto" v-model="aggRangeMode" class="accent-indigo-600">
+                                                  Auto
+                                                </label>
+                                                <label class="text-xs flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
+                                                  <input type="radio" value="manual" v-model="aggRangeMode" class="accent-indigo-600">
+                                                  Manual
+                                                </label>
+
+                                                <!-- preset window (used by Auto, also can fill Manual end=now/start=end-window) -->
+                                                <span class="text-xs text-gray-500 ml-2">Preset</span>
+                                                <select v-model="aggPreset" class="text-xs p-2 border rounded bg-white">
+                                                  <option value="3600">1h</option>
+                                                  <option value="21600">6h</option>
+                                                  <option value="86400">24h</option>
+                                                  <option value="604800">7d</option>
+                                                  <option value="custom">Custom</option>
+                                                </select>
+
+                                                <input v-if="aggPreset==='custom'" v-model.number="aggPresetCustomSec"
+                                                       type="number" min="60" step="60"
+                                                       class="text-xs p-2 border rounded w-28 text-center font-mono bg-white"
+                                                       title="seconds"
+                                                       placeholder="sec"/>
+
+                                                <button v-if="aggRangeMode==='manual'" @click="fillManualEndNow()"
+                                                        class="text-[11px] px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                  End = Now
+                                                </button>
+
+                                                <button v-if="aggRangeMode==='manual'" @click="applyPresetToManual()"
+                                                        class="text-[11px] px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                  Apply Preset → Manual
+                                                </button>
+                                              </div>
+
+                                              <!-- row 2: time_field -->
+                                              <div class="flex flex-wrap items-center gap-2">
                                                 <button @click="detectTimeFields()"
-                                                    class="text-[11px] px-2 py-1 bg-white border rounded hover:bg-gray-100">
-                                                    <i
-                                                        class="fa-solid fa-wand-magic-sparkles mr-1 text-gray-400"></i>Detect
-                                                    Fields
+                                                        class="text-[11px] px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                  <i class="fa-solid fa-wand-magic-sparkles mr-1 text-gray-400"></i>Detect Fields
                                                 </button>
 
                                                 <span class="text-xs text-gray-500">time_field</span>
 
-                                                <select v-model="selectedTimeFieldOption"
-                                                    class="text-xs p-2 border rounded bg-white">
-                                                    <option value="" disabled>-- Select --</option>
-                                                    <option v-for="f in timeFieldCandidates" :key="f.key"
-                                                        :value="f.key">
-                                                        {{ f.key }} ({{ f.count }})
-                                                    </option>
-                                                    <option value="__custom__">Custom...</option>
+                                                <select v-model="selectedTimeFieldOption" class="text-xs p-2 border rounded bg-white">
+                                                  <option value="" disabled>-- Select --</option>
+                                                  <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">
+                                                    {{ f.key }} ({{ f.count }})
+                                                  </option>
+                                                  <option value="__custom__">Custom...</option>
                                                 </select>
 
                                                 <input v-if="selectedTimeFieldOption === '__custom__'"
-                                                    v-model="aggregationTimeField" placeholder="e.g. pub_timestamp"
-                                                    class="text-xs p-2 border rounded font-mono bg-white w-56" />
+                                                       v-model="aggregationTimeField"
+                                                       placeholder="e.g. pub_timestamp"
+                                                       class="text-xs p-2 border rounded font-mono bg-white w-56"/>
                                                 <input v-else v-model="aggregationTimeField"
-                                                    class="text-xs p-2 border rounded font-mono bg-gray-100 text-gray-500 w-56"
-                                                    readonly />
+                                                       class="text-xs p-2 border rounded font-mono bg-gray-100 text-gray-500 w-56"
+                                                       readonly/>
+                                              </div>
+
+                                              <!-- row 3: manual datetime-local inputs -->
+                                              <div v-if="aggRangeMode==='manual'" class="flex flex-wrap items-center gap-2">
+                                                <span class="text-xs text-gray-500">Start</span>
+                                                <input type="datetime-local" v-model="aggManualStartLocal"
+                                                       class="text-xs p-2 border rounded bg-white"/>
+
+                                                <span class="text-xs text-gray-500">End</span>
+                                                <input type="datetime-local" v-model="aggManualEndLocal"
+                                                       class="text-xs p-2 border rounded bg-white"/>
 
                                                 <span class="text-xs text-gray-400 font-mono">
-                                                    start: {{ aggTimeRange.start || 'N/A' }} / end: {{ aggTimeRange.end
-                                                    || 'N/A' }}
+                                                  (epoch) {{ aggTimeRange.start || 'N/A' }} → {{ aggTimeRange.end || 'N/A' }}
                                                 </span>
+                                              </div>
+
+                                              <!-- row 4: auto preview -->
+                                              <div v-else class="text-xs text-gray-400 font-mono">
+                                                Auto window will compute: end=max_ts(from timestamp_stats) or now; start=end-preset
+                                                <br/>
+                                                (epoch) {{ aggTimeRange.start || 'N/A' }} → {{ aggTimeRange.end || 'N/A' }}
+                                              </div>
+
                                             </div>
+
                                         </div>
 
                                         <div class="flex items-center gap-2 flex-shrink-0">
@@ -644,11 +705,8 @@
                                         </div>
 
                                         <div class="py-4 flex-1 min-h-0 overflow-y-auto scroller pr-2">
-
                                             <!-- OFFLINE -->
                                             <div v-if="aggViewTab==='offline'" class="h-full flex flex-col gap-4 min-h-0">
-                                                class="h-full flex flex-col gap-4 overflow-hidden">
-
                                                 <!-- Offline Latest summary -->
                                                 <div class="bg-white border rounded-lg shadow-sm overflow-hidden flex-shrink-0">
                                                     <div
@@ -1138,8 +1196,62 @@
                     reduce_params: { n_neighbors: 15, min_dist: 0.1 }
                 });
 
+                const datetimeLocalToEpoch = (s) => {
+                  // s: "YYYY-MM-DDTHH:mm" (no timezone)
+                  if (!s) return null;
+                  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+                  if (!m) return null;
+                  const y = +m[1], mo = +m[2] - 1, d = +m[3], h = +m[4], mi = +m[5];
+                  // Date(year, monthIndex, day, hour, minute) uses local timezone
+                  return Math.floor(new Date(y, mo, d, h, mi, 0).getTime() / 1000);
+                };
+
+                const epochToDatetimeLocal = (sec) => {
+                  if (!sec) return '';
+                  const dt = new Date(sec * 1000);
+                  const pad = (n) => String(n).padStart(2, '0');
+                  const y = dt.getFullYear();
+                  const mo = pad(dt.getMonth() + 1);
+                  const d = pad(dt.getDate());
+                  const h = pad(dt.getHours());
+                  const mi = pad(dt.getMinutes());
+                  return `${y}-${mo}-${d}T${h}:${mi}`;
+                };
+
+                const getPresetSeconds = () => {
+                  if (aggPreset.value === 'custom') return Math.max(60, Number(aggPresetCustomSec.value || 0));
+                  return Number(aggPreset.value || 86400);
+                };
+
+                const fillManualEndNow = () => {
+                  const now = Math.floor(Date.now() / 1000);
+                  aggManualEndLocal.value = epochToDatetimeLocal(now);
+                  // if start empty, set start=end-preset
+                  if (!aggManualStartLocal.value) {
+                    aggManualStartLocal.value = epochToDatetimeLocal(now - getPresetSeconds());
+                  }
+                  updateAggTimeRangeFromManual();
+                };
+
+                const applyPresetToManual = () => {
+                  const end = datetimeLocalToEpoch(aggManualEndLocal.value) || Math.floor(Date.now()/1000);
+                  aggManualEndLocal.value = epochToDatetimeLocal(end);
+                  aggManualStartLocal.value = epochToDatetimeLocal(end - getPresetSeconds());
+                  updateAggTimeRangeFromManual();
+                };
+
+                const updateAggTimeRangeFromManual = () => {
+                  const s = datetimeLocalToEpoch(aggManualStartLocal.value);
+                  const e = datetimeLocalToEpoch(aggManualEndLocal.value);
+                  if (s && e && s < e) {
+                    aggTimeRange.value = { start: s, end: e };
+                  } else {
+                    aggTimeRange.value = { start: s || null, end: e || null };
+                  }
+                };
+
                 // --------------------
-                // Aggregation (NEW)
+                // Aggregation
                 // --------------------
                 const aggregationPlans = ref([]);        // all plans
                 const selectedPlanId = ref('');
@@ -1148,6 +1260,18 @@
 
                 const aggTimeRange = ref({ start: null, end: null });
                 const aggregationTimeField = ref('timestamp');
+
+                // --- time range controls ---
+                const aggRangeMode = ref('auto'); // 'auto' | 'manual'
+
+                // preset window seconds (default 24h)
+                const aggPreset = ref('86400');   // string because <select>
+                const aggPresetCustomSec = ref(86400);
+
+                // manual datetime-local strings
+                const aggManualStartLocal = ref('');
+                const aggManualEndLocal = ref('');
+
                 // --- time field candidate discovery ---
                 const timeFieldCandidates = ref([]);            // [{key, count}]
                 const selectedTimeFieldOption = ref('timestamp');  // dropdown selection
@@ -1400,8 +1524,20 @@
                     selectedOfflineClusterId.value = '';
                     offlineLatest.value = null;
                     onlineState.value = null;
+
                     aggJob.value = { status: 'idle', jobId: null, error: null };
+
+                    const plan = (aggregationPlans.value || []).find(p => p.plan_id === planId);
+                    if (plan && plan.time_window_sec) {
+                      aggPreset.value = String(plan.time_window_sec);
+                      if (![ '3600','21600','86400','604800' ].includes(aggPreset.value)) {
+                        aggPreset.value = 'custom';
+                        aggPresetCustomSec.value = plan.time_window_sec;
+                      }
+                    }
+                    aggRangeMode.value = 'auto'; // 默认 auto
                     aggTimeRange.value = { start: null, end: null };
+
                     await refreshSelectedPlanViews();
                 };
 
@@ -1440,50 +1576,65 @@
                 };
 
                 const autoPickTimeRangeAndRun = async () => {
-                    if (!selectedPlanId.value) return;
-                    if (!selectedCollection.value) return;
+                  if (!selectedPlanId.value || !selectedCollection.value) return;
 
-                    aggJob.value = { status: 'processing', jobId: null, error: null };
+                  aggJob.value = { status: 'processing', jobId: null, error: null };
 
-                    try {
-                        // 1) load plan details to know window size
-                        const plan = (aggregationPlans.value || []).find(p => p.plan_id === selectedPlanId.value);
-                        const windowSec = plan ? (plan.time_window_sec || 24 * 3600) : (24 * 3600);
+                  try {
+                    // 0) 找到 plan，拿默认窗口秒数（auto 用）
+                    const plan = (aggregationPlans.value || []).find(p => p.plan_id === selectedPlanId.value);
+                    const windowSec = plan ? (plan.time_window_sec || 24 * 3600) : (24 * 3600);
 
-                        // 2) timestamp_stats to find max_ts
-                        const tsRes = await fetch(`api/collections/${encodeURIComponent(selectedCollection.value)}/timestamp_stats?time_field=${encodeURIComponent(aggregationTimeField.value)}&scan_limit=20000`);
-                        const tsData = await tsRes.json();
-                        if (!tsRes.ok) throw new Error(tsData.error || 'timestamp_stats failed');
+                    let start = null;
+                    let end = null;
 
-                        let end = tsData.max_ts;
-                        if (!end) {
-                            // fallback: now
-                            end = Date.now() / 1000;
-                        }
-                        const start = end - windowSec;
+                    // 1) 根据模式决定 start/end
+                    if (aggRangeMode.value === 'manual') {
+                      // 手动：直接用 UI 里维护的 epoch
+                      start = aggTimeRange.value.start;
+                      end = aggTimeRange.value.end;
 
-                        aggTimeRange.value = { start, end };
+                      if (!start || !end || start >= end) {
+                        throw new Error('Invalid manual time range. Please set Start < End.');
+                      }
+                    } else {
+                      // 自动：从 timestamp_stats 拿 max_ts，当作 end；start = end - windowSec
+                      const tsRes = await fetch(
+                        `api/collections/${encodeURIComponent(selectedCollection.value)}/timestamp_stats?time_field=${encodeURIComponent(aggregationTimeField.value)}&scan_limit=20000`
+                      );
+                      const tsData = await tsRes.json();
+                      if (!tsRes.ok) throw new Error(tsData.error || 'timestamp_stats failed');
 
-                        // 3) run plan
-                        const runPayload = {
-                            time_range: [start, end],
-                            overrides: { time_field: aggregationTimeField.value }
-                        };
-                        const runRes = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/run`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(runPayload)
-                        });
-                        const runData = await runRes.json();
-                        if (runRes.status !== 202) throw new Error(runData.error || 'Failed to start run');
+                      end = tsData.max_ts ? Number(tsData.max_ts) : (Date.now() / 1000);
+                      start = end - windowSec;
 
-                        aggJob.value.jobId = runData.job_id;
-                        await pollAggJob(runData.job_id);
-
-                    } catch (e) {
-                        aggJob.value = { status: 'failed', jobId: aggJob.value.jobId, error: e.message };
-                        showToast(e.message, 'error');
+                      // 写回 UI 显示
+                      aggTimeRange.value = { start, end };
                     }
+
+                    // 2) Run
+                    const runPayload = {
+                      time_range: [start, end],
+                      overrides: { time_field: aggregationTimeField.value }
+                    };
+
+                    const runRes = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/run`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(runPayload)
+                    });
+                    const runData = await runRes.json();
+                    if (runRes.status !== 202) throw new Error(runData.error || 'Failed to start run');
+
+                    aggJob.value.jobId = runData.job_id;
+
+                    // 3) Poll
+                    await pollAggJob(runData.job_id);
+
+                  } catch (e) {
+                    aggJob.value = { status: 'failed', jobId: aggJob.value.jobId, error: e.message };
+                    showToast(e.message, 'error');
+                  }
                 };
 
                 const pollAggJob = async (jobId) => {
@@ -1934,11 +2085,19 @@
                     aggregationTimeField.value = v;
                 });
 
+                watch([aggManualStartLocal, aggManualEndLocal], () => {
+                  if (aggRangeMode.value === 'manual') updateAggTimeRangeFromManual();
+                });
+
                 return {
                     currentTab, collections, selectedCollection, stats, showCreateModal, newCollectionForm, toast,
                     browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
                     refreshCollections, createNewCollection, loadCollection, fetchDocuments, performSearch, doUpsert, deleteDoc,
                     clearCollection, downloadBackup, uploadRestore, tabClass, getScoreColor, queueStats,
+
+                    aggRangeMode, aggPreset, aggPresetCustomSec,
+                    aggManualStartLocal, aggManualEndLocal,
+                    fillManualEndNow, applyPresetToManual,
 
                     // Aggregation exports
                     aggregationPlans, aggregationFilteredPlans, selectedPlanId,
