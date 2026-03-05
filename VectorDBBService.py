@@ -752,6 +752,89 @@ class VectorDBService:
             st = self.cluster_mgr.store.get_online_state(plan_id)
             return jsonify(st or {})
 
+        @route("/api/aggregation/plans/<plan_id>/offline/cluster/<cluster_id>/items", methods=["GET"])
+        def agg_offline_cluster_items(plan_id, cluster_id):
+            if not self.cluster_mgr or not hasattr(self.cluster_mgr, "store"):
+                return jsonify({"error": "store not configured"}), 501
+
+            # 1) 取 latest offline
+            latest = self.cluster_mgr.store.get_latest_offline(plan_id)
+            if not latest:
+                return jsonify({"error": "No offline result"}), 404
+
+            clusters = latest.get("clusters") or {}
+            if cluster_id not in clusters:
+                return jsonify({"error": f"cluster_id not found: {cluster_id}"}), 404
+
+            members = clusters[cluster_id].get("members") or []
+            limit = int(request.args.get("limit", 100))
+            members = members[:limit]
+
+            # 2) 按 plan 找 collection
+            plan = self.cluster_mgr.get_plan(plan_id)
+            if not plan:
+                return jsonify({"error": "plan not found"}), 404
+            repo = self.engine.get_repository(plan.collection_name)
+            if not repo:
+                return jsonify({"error": "collection not found"}), 404
+
+            # 3) 查 Chroma：where $in （注意 include 不要 ids）
+            #    分批避免 $in 太长
+            BATCH = 200
+            out = []
+            for i in range(0, len(members), BATCH):
+                sub = members[i:i + BATCH]
+                try:
+                    res = repo._collection.get(
+                        where={"original_doc_id": {"$in": sub}},
+                        include=["documents", "metadatas"]
+                    )
+                except Exception as e:
+                    return jsonify({"error": str(e)}), 500
+
+                ids = res.get("ids") or []
+                docs = res.get("documents") or []
+                metas = res.get("metadatas") or []
+
+                # 4) 去重：每个 original_doc_id 取第一条chunk/或最短 chunk_index
+                best = {}
+                for j in range(len(ids)):
+                    m = metas[j] or {}
+                    od = m.get("original_doc_id")
+                    if not od:
+                        continue
+                    if od in best:
+                        # 可选：按 chunk_index 取最小
+                        if m.get("chunk_index", 999999) < best[od]["chunk_index"]:
+                            best[od] = {
+                                "doc_id": od,
+                                "chunk_id": ids[j],
+                                "preview": (docs[j] or "")[:200],
+                                "metadata": m,
+                                "chunk_index": m.get("chunk_index", 0)
+                            }
+                    else:
+                        best[od] = {
+                            "doc_id": od,
+                            "chunk_id": ids[j],
+                            "preview": (docs[j] or "")[:200],
+                            "metadata": m,
+                            "chunk_index": m.get("chunk_index", 0)
+                        }
+
+                out.extend(best.values())
+
+            # 按 members 原顺序排序
+            rank = {d: i for i, d in enumerate(members)}
+            out.sort(key=lambda x: rank.get(x["doc_id"], 10 ** 9))
+
+            return jsonify({
+                "plan_id": plan_id,
+                "cluster_id": cluster_id,
+                "count": len(out),
+                "items": out
+            })
+
         return bp
 
     def _run_analysis_task(self, job_id: str, collection_name: str, config_payload: Dict[str, Any]):

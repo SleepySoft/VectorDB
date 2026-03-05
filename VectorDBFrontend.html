@@ -613,26 +613,31 @@
                                             </div>
 
                                             <!-- Cluster detail -->
-                                            <div v-if="selectedOfflineCluster" class="border rounded bg-gray-50 p-4">
-                                                <div class="flex items-center justify-between mb-2">
-                                                    <div class="font-bold text-gray-700">Cluster Detail: {{ selectedOfflineClusterId }}</div>
-                                                    <div class="text-xs text-gray-400">members shown: {{ selectedOfflineCluster.members.length }}</div>
-                                                </div>
-                                                <div class="grid grid-cols-12 gap-3">
-                                                    <div class="col-span-4 bg-white border rounded p-3">
-                                                        <div class="text-xs text-gray-500 font-bold">repr_doc_id</div>
-                                                        <div class="font-mono text-[11px] break-all">{{ selectedOfflineCluster.repr_doc_id }}</div>
-                                                    </div>
-                                                    <div class="col-span-8 bg-white border rounded p-3">
-                                                        <div class="text-xs text-gray-500 font-bold">members (first 200)</div>
-                                                        <div class="font-mono text-[11px] text-gray-700 max-h-32 overflow-y-auto scroller">
-                                                            <div v-for="m in selectedOfflineCluster.members.slice(0,200)" :key="m" class="truncate">
-                                                                {{ m }}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
+                                        <div v-if="selectedOfflineClusterId" class="border rounded bg-gray-50 p-4">
+                                          <div class="flex items-center justify-between mb-2">
+                                            <div class="font-bold text-gray-700">Cluster Detail: {{ selectedOfflineClusterId }}</div>
+                                            <div class="text-xs text-gray-400">
+                                              {{ offlineClusterItemsLoading ? 'loading...' : `items: ${(offlineClusterItems || []).length}` }}
                                             </div>
+                                          </div>
+
+                                          <div v-if="offlineClusterItemsLoading" class="p-6 text-center text-gray-400">
+                                            <i class="fa-solid fa-spinner fa-spin mr-2"></i> Loading items...
+                                          </div>
+
+                                          <div v-else class="space-y-3 max-h-80 overflow-y-auto scroller">
+                                            <div v-for="it in offlineClusterItems" :key="it.chunk_id" class="bg-white p-3 rounded border">
+                                              <div class="flex justify-between text-xs text-gray-400 font-mono mb-1">
+                                                <span class="truncate">{{ it.doc_id }}</span>
+                                                <span>{{ it.chunk_id }}</span>
+                                              </div>
+                                              <div class="text-sm text-gray-700">{{ it.preview }}</div>
+                                              <div class="mt-2 text-[11px] text-gray-500">
+                                                <pre class="whitespace-pre-wrap">{{ JSON.stringify(it.metadata, null, 1) }}</pre>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
 
                                         </div>
                                     </div>
@@ -957,6 +962,8 @@
                 const selectedOfflineClusterId = ref('');
 
                 const onlineClusterFilter = ref('');
+                const offlineClusterItems = ref([]);
+                const offlineClusterItemsLoading = ref(false);
 
                 const showPlanModal = ref(false);
                 const planForm = ref({
@@ -1174,6 +1181,22 @@
                     }
                 };
 
+                const loadOfflineClusterItems = async (clusterId) => {
+                  if (!selectedPlanId.value || !clusterId) return;
+                  offlineClusterItemsLoading.value = true;
+                  offlineClusterItems.value = [];
+                  try {
+                    const res = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/offline/cluster/${encodeURIComponent(clusterId)}/items?limit=100`);
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'load cluster items failed');
+                    offlineClusterItems.value = data.items || [];
+                  } catch(e) {
+                    showToast(e.message, 'error');
+                  } finally {
+                    offlineClusterItemsLoading.value = false;
+                  }
+                };
+
                 const selectPlan = async (planId) => {
                     selectedPlanId.value = planId;
                     selectedOfflineClusterId.value = '';
@@ -1213,8 +1236,9 @@
                     }
                 };
 
-                const selectOfflineCluster = (clusterId) => {
-                    selectedOfflineClusterId.value = clusterId;
+                const selectOfflineCluster = async (clusterId) => {
+                  selectedOfflineClusterId.value = clusterId;
+                  await loadOfflineClusterItems(clusterId);
                 };
 
                 const autoPickTimeRangeAndRun = async () => {
@@ -1736,6 +1760,7 @@
                     openPlanModalForCreateOrEdit, savePlanFromModal, deletePlanConfirm,
 
                     timeFieldCandidates, selectedTimeFieldOption, detectTimeFields,
+                    loadOfflineClusterItems, offlineClusterItems, offlineClusterItemsLoading,
 
                     // Explore Variables (Fixed)
                     exploreConfig,
