@@ -738,6 +738,20 @@ class VectorDBService:
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
+        @route("/api/aggregation/plans/<plan_id>/offline/latest", methods=["GET"])
+        def agg_offline_latest(plan_id):
+            if not self.cluster_mgr or not hasattr(self.cluster_mgr, "store"):
+                return jsonify({"error": "store not configured"}), 501
+            latest = self.cluster_mgr.store.get_latest_offline(plan_id)
+            return jsonify(latest or {})
+
+        @route("/api/aggregation/plans/<plan_id>/online/state", methods=["GET"])
+        def agg_online_state(plan_id):
+            if not self.cluster_mgr or not hasattr(self.cluster_mgr, "store"):
+                return jsonify({"error": "store not configured"}), 501
+            st = self.cluster_mgr.store.get_online_state(plan_id)
+            return jsonify(st or {})
+
         return bp
 
     def _run_analysis_task(self, job_id: str, collection_name: str, config_payload: Dict[str, Any]):
@@ -881,8 +895,10 @@ def main():
         params={"min_cluster_size": 3, "min_samples": 2},
         max_points=50000,
         enable_online=True,
+        online_params={"T_event": 0.85, "T_dup": 0.95}
     )
     cluster_mgr.register_plan(plan)
+    cluster_mgr.store = store           # TODO: Temporary
 
     # 2. Initialize Service
     service = VectorDBService(engine=engine_instance, cluster_mgr=cluster_mgr)

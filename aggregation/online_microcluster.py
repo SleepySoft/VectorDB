@@ -154,7 +154,8 @@ class OnlineMicroClusterManager(OnlineHandler):
         doc_to_cluster = state["doc_to_cluster"]
 
         # Prevent duplicate processing
-        if doc_id in doc_to_cluster:
+        allow_update = bool((self.plan.online_params or {}).get("allow_update", False))
+        if doc_id in doc_to_cluster and not allow_update:
             return
 
         # Find best cluster by cosine similarity to centroids

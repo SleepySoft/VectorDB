@@ -5,3 +5,4 @@ pydantic
 requests
 chromadb
 sentence-transformers
+hdbscan

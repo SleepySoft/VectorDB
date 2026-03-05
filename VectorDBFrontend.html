@@ -106,6 +106,9 @@
                     <button @click="currentTab = 'explore'" :class="tabClass('explore')" class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-map-location-dot mr-2"></i> Explore / Clusters
                     </button>
+                    <button @click="currentTab = 'aggregation'; initAggregationTab()" :class="tabClass('aggregation')" class="pb-3 px-1 font-medium text-sm flex items-center">
+                        <i class="fa-solid fa-layer-group mr-2"></i> Aggregation
+                    </button>
                     <button @click="currentTab = 'add'" :class="tabClass('add')" class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-file-circle-plus mr-2"></i> Add / Upsert
                     </button>
@@ -226,81 +229,81 @@
                 </div>
                 <div v-else-if="currentTab === 'explore'" class="flex h-full bg-slate-50">
 
-                        <div class="flex-1 flex flex-col h-full relative">
-                            <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-4 rounded shadow border border-gray-200 flex items-center space-x-3 min-w-[500px]">
-                            <div v-if="activeCluster === null" class="flex items-center space-x-4">
+                    <div class="flex-1 flex flex-col h-full relative">
+                        <div class="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur p-4 rounded shadow border border-gray-200 flex items-center space-x-3 min-w-[500px]">
+                        <div v-if="activeCluster === null" class="flex items-center space-x-4">
 
+                            <div class="flex flex-col">
+                                <label class="text-[10px] uppercase font-bold text-gray-400">Reduction</label>
+                                <select v-model="exploreConfig.reduce_method" class="w-24 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
+                                    <option value="pca">PCA (Fast)</option>
+                                    <option value="umap">UMAP (Best)</option>
+                                </select>
+                            </div>
+
+                            <div class="flex flex-col">
+                                <label class="text-[10px] uppercase font-bold text-gray-400">Clustering</label>
+                                <select v-model="exploreConfig.cluster_method" class="w-28 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
+                                    <option value="birch">Birch (Auto K)</option>
+                                    <option value="kmeans">K-Means (Fixed)</option>
+                                    <option value="dbscan">DBSCAN</option>
+                                </select>
+                            </div>
+
+                            <div v-if="exploreConfig.cluster_method === 'birch'" class="flex flex-col">
+                                <label class="text-[10px] uppercase font-bold text-gray-400">Threshold</label>
+                                <input v-model.number="exploreConfig.birch.threshold" type="number" step="0.05" min="0.1" max="1.0"
+                                       class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center" title="Smaller = More Clusters">
+                            </div>
+
+                            <div v-if="exploreConfig.cluster_method === 'kmeans'" class="flex flex-col">
+                                <label class="text-[10px] uppercase font-bold text-gray-400">Clusters (K)</label>
+                                <input v-model.number="exploreConfig.kmeans.n_clusters" type="number" min="2" max="100"
+                                       class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center">
+                            </div>
+
+                            <div v-if="exploreConfig.cluster_method === 'dbscan'" class="flex space-x-2">
                                 <div class="flex flex-col">
-                                    <label class="text-[10px] uppercase font-bold text-gray-400">Reduction</label>
-                                    <select v-model="exploreConfig.reduce_method" class="w-24 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
-                                        <option value="pca">PCA (Fast)</option>
-                                        <option value="umap">UMAP (Best)</option>
-                                    </select>
-                                </div>
-
-                                <div class="flex flex-col">
-                                    <label class="text-[10px] uppercase font-bold text-gray-400">Clustering</label>
-                                    <select v-model="exploreConfig.cluster_method" class="w-28 border border-gray-300 rounded px-1 py-1 text-xs bg-white focus:ring-1 focus:ring-blue-500">
-                                        <option value="birch">Birch (Auto K)</option>
-                                        <option value="kmeans">K-Means (Fixed)</option>
-                                        <option value="dbscan">DBSCAN</option>
-                                    </select>
-                                </div>
-
-                                <div v-if="exploreConfig.cluster_method === 'birch'" class="flex flex-col">
-                                    <label class="text-[10px] uppercase font-bold text-gray-400">Threshold</label>
-                                    <input v-model.number="exploreConfig.birch.threshold" type="number" step="0.05" min="0.1" max="1.0"
-                                           class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center" title="Smaller = More Clusters">
-                                </div>
-
-                                <div v-if="exploreConfig.cluster_method === 'kmeans'" class="flex flex-col">
-                                    <label class="text-[10px] uppercase font-bold text-gray-400">Clusters (K)</label>
-                                    <input v-model.number="exploreConfig.kmeans.n_clusters" type="number" min="2" max="100"
-                                           class="w-16 border border-gray-300 rounded px-1 py-1 text-xs text-center">
-                                </div>
-
-                                <div v-if="exploreConfig.cluster_method === 'dbscan'" class="flex space-x-2">
-                                    <div class="flex flex-col">
-                                        <label class="text-[10px] uppercase font-bold text-gray-400">Eps</label>
-                                        <input v-model.number="exploreConfig.dbscan.eps" type="number" step="0.1" min="0.1"
-                                               class="w-14 border border-gray-300 rounded px-1 py-1 text-xs text-center">
-                                    </div>
-                                </div>
-
-                                <div class="flex flex-col">
-                                    <label class="text-[10px] uppercase font-bold text-gray-400">Limit</label>
-                                    <select v-model.number="exploreConfig.limit" class="w-20 border border-gray-300 rounded px-1 py-1 text-xs bg-white">
-                                        <option value="5000">5k Docs</option>
-                                        <option value="20000">20k Docs</option>
-                                        <option value="50000">50k Docs</option>
-                                    </select>
-                                </div>
-
-                                <div class="h-8 w-px bg-gray-300 mx-1"></div>
-
-                                <div class="flex flex-col justify-end">
-                                    <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
-                                        class="bg-indigo-600 text-white px-4 py-1 rounded text-xs font-bold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center h-[26px] shadow-sm transition">
-                                        <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
-                                        {{ analysisState.status === 'processing' ? 'COMPUTING...' : 'ANALYZE' }}
-                                    </button>
+                                    <label class="text-[10px] uppercase font-bold text-gray-400">Eps</label>
+                                    <input v-model.number="exploreConfig.dbscan.eps" type="number" step="0.1" min="0.1"
+                                           class="w-14 border border-gray-300 rounded px-1 py-1 text-xs text-center">
                                 </div>
                             </div>
 
-                                <div v-else>
-                                    <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
-                                        <i class="fa-solid fa-arrow-left mr-2"></i> Show All Groups
-                                    </button>
-                                </div>
+                            <div class="flex flex-col">
+                                <label class="text-[10px] uppercase font-bold text-gray-400">Limit</label>
+                                <select v-model.number="exploreConfig.limit" class="w-20 border border-gray-300 rounded px-1 py-1 text-xs bg-white">
+                                    <option value="5000">5k Docs</option>
+                                    <option value="20000">20k Docs</option>
+                                    <option value="50000">50k Docs</option>
+                                </select>
                             </div>
 
-                            <div ref="chartContainer" class="w-full h-full bg-slate-50">
-                                <div v-if="!analysisState.hasData && analysisState.status !== 'processing'" class="h-full flex flex-col items-center justify-center text-gray-400">
-                                    <i class="fa-solid fa-map-location-dot text-5xl mb-3 text-gray-300"></i>
-                                    <p>Select clustering method and click "Analyze" to visualize your data topology.</p>
-                                </div>
+                            <div class="h-8 w-px bg-gray-300 mx-1"></div>
+
+                            <div class="flex flex-col justify-end">
+                                <button @click="startAnalysis" :disabled="analysisState.status === 'processing'"
+                                    class="bg-indigo-600 text-white px-4 py-1 rounded text-xs font-bold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-wait flex items-center h-[26px] shadow-sm transition">
+                                    <i v-if="analysisState.status === 'processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
+                                    {{ analysisState.status === 'processing' ? 'COMPUTING...' : 'ANALYZE' }}
+                                </button>
                             </div>
                         </div>
+
+                            <div v-else>
+                                <button @click="resetFocus" class="bg-gray-700 text-white px-3 py-1 rounded text-sm hover:bg-gray-600 flex items-center">
+                                    <i class="fa-solid fa-arrow-left mr-2"></i> Show All Groups
+                                </button>
+                            </div>
+                        </div>
+
+                        <div ref="chartContainer" class="w-full h-full bg-slate-50">
+                            <div v-if="!analysisState.hasData && analysisState.status !== 'processing'" class="h-full flex flex-col items-center justify-center text-gray-400">
+                                <i class="fa-solid fa-map-location-dot text-5xl mb-3 text-gray-300"></i>
+                                <p>Select clustering method and click "Analyze" to visualize your data topology.</p>
+                            </div>
+                        </div>
+                    </div>
 
                     <div class="w-96 bg-white border-l border-gray-200 flex flex-col h-full shadow-lg z-10 transition-all">
 
@@ -363,6 +366,381 @@
                             </div>
                         </div>
 
+                    </div>
+                </div>
+
+                <div v-else-if="currentTab === 'aggregation'" class="h-full overflow-auto p-8 bg-gray-50">
+                    <div class="max-w-6xl mx-auto space-y-6">
+
+                        <!-- Header -->
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h2 class="text-xl font-bold text-gray-800 flex items-center">
+                                    <i class="fa-solid fa-layer-group mr-3 text-indigo-600"></i>
+                                    Aggregation (Plans / Offline / Online)
+                                </h2>
+                                <p class="text-xs text-gray-500 mt-1">
+                                    Scope: <b>{{ selectedCollection || 'N/A' }}</b>
+                                    <span class="mx-2 text-gray-300">|</span>
+                                    Select a plan to view results (offline version & online state).
+                                </p>
+                            </div>
+
+                            <div class="flex items-center space-x-2">
+                                <button @click="refreshAggregationPlans()" class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm">
+                                    <i class="fa-solid fa-rotate mr-2 text-gray-400"></i>Refresh Plans
+                                </button>
+
+                                <button :disabled="!selectedCollection" @click="openPlanModalForCreateOrEdit()"
+                                        class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm disabled:opacity-50">
+                                    <i class="fa-solid fa-pen-to-square mr-2"></i>
+                                    {{ aggregationFilteredPlans.length > 0 ? 'Edit Plan' : 'Create Plan' }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="!selectedCollection" class="bg-white border rounded p-6 text-gray-500">
+                            Please select a collection first.
+                        </div>
+
+                        <div v-else class="grid grid-cols-12 gap-6">
+
+                            <!-- Left: Plan list (filtered by collection) -->
+                            <div class="col-span-4 bg-white border rounded-lg shadow-sm">
+                                <div class="p-4 border-b bg-gray-50 flex items-center justify-between">
+                                    <div>
+                                        <div class="font-bold text-gray-700">Plans</div>
+                                        <div class="text-xs text-gray-400">Only plans for this collection</div>
+                                    </div>
+                                    <span class="text-xs bg-gray-100 border rounded px-2 py-1 text-gray-500">
+                                        {{ aggregationFilteredPlans.length }}
+                                    </span>
+                                </div>
+
+                                <div class="p-2 space-y-2 scroller max-h-[520px] overflow-y-auto">
+                                    <div v-if="aggregationFilteredPlans.length === 0" class="p-6 text-sm text-gray-400 italic">
+                                        No plan found for this collection. Click "Create Plan".
+                                    </div>
+
+                                    <div v-for="p in aggregationFilteredPlans" :key="p.plan_id"
+                                         class="p-3 rounded border hover:bg-indigo-50 cursor-pointer transition"
+                                         :class="selectedPlanId === p.plan_id ? 'border-indigo-400 bg-indigo-50' : 'border-gray-100'"
+                                         @click="selectPlan(p.plan_id)">
+                                        <div class="flex items-center justify-between">
+                                            <div class="font-mono text-xs text-indigo-700 font-bold truncate" :title="p.plan_id">
+                                                {{ p.plan_id }}
+                                            </div>
+                                            <span class="text-[10px] px-2 py-0.5 rounded border"
+                                                  :class="p.enable_online ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-600 border-gray-200'">
+                                                {{ p.enable_online ? 'ONLINE' : 'OFFLINE' }}
+                                            </span>
+                                        </div>
+
+                                        <div class="mt-2 text-xs text-gray-600 flex items-center justify-between">
+                                            <span class="bg-gray-50 border px-2 py-0.5 rounded">
+                                                {{ p.method }}
+                                            </span>
+                                            <span class="text-gray-400">
+                                                window {{ Math.round(p.time_window_sec/3600) }}h
+                                            </span>
+                                        </div>
+
+                                        <div class="mt-2 text-[11px] text-gray-400">
+                                            max_points: {{ p.max_points }} | limit: {{ p.limit }}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right: Plan details -->
+                            <div class="col-span-8 space-y-4">
+
+                                <div v-if="!selectedPlanId" class="bg-white border rounded p-8 text-gray-400 flex items-center justify-center">
+                                    Select a plan on the left to view offline/online results.
+                                </div>
+
+                                <div v-else class="space-y-4">
+
+                                    <!-- Controls -->
+                                    <div class="bg-white border rounded-lg shadow-sm p-4 space-y-3">
+                                        <div class="flex items-center justify-between">
+                                            <div>
+                                                <div class="text-sm font-bold text-gray-700">Selected Plan</div>
+                                                <div class="text-xs text-gray-400 font-mono">{{ selectedPlanId }}</div>
+                                            </div>
+
+                                            <div class="flex items-center space-x-2">
+                                                <button @click="autoPickTimeRangeAndRun()"
+                                                        :disabled="aggJob.status==='processing'"
+                                                        class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm disabled:opacity-50">
+                                                    <i v-if="aggJob.status==='processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
+                                                    {{ aggJob.status==='processing' ? 'RUNNING...' : 'Auto Window & Run' }}
+                                                </button>
+
+                                                <button @click="refreshSelectedPlanViews()"
+                                                        class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm">
+                                                    <i class="fa-solid fa-rotate mr-2 text-gray-400"></i>Refresh Views
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <!-- Time range preview -->
+                                        <div class="text-xs text-gray-600 bg-gray-50 border rounded p-3">
+                                            <div class="flex items-center justify-between">
+                                                <span class="font-bold text-gray-500">Time Range (for offline run)</span>
+                                                <span class="text-gray-400">time_field: {{ aggregationTimeField }}</span>
+                                            </div>
+                                            <div class="mt-1 font-mono text-[11px]">
+                                                start: {{ aggTimeRange.start || 'N/A' }}<br/>
+                                                end:   {{ aggTimeRange.end || 'N/A' }}
+                                            </div>
+                                        </div>
+
+                                        <!-- Job status -->
+                                        <div v-if="aggJob.jobId" class="text-xs border rounded p-3"
+                                             :class="aggJob.status==='failed' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'">
+                                            <div class="flex items-center justify-between">
+                                                <span class="font-bold">Job: {{ aggJob.jobId }}</span>
+                                                <span class="font-mono">{{ aggJob.status }}</span>
+                                            </div>
+                                            <div v-if="aggJob.error" class="mt-1 font-mono text-[11px]">
+                                                {{ aggJob.error }}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Offline Latest -->
+                                    <div class="bg-white border rounded-lg shadow-sm">
+                                        <div class="p-4 border-b bg-gray-50 flex items-center justify-between">
+                                            <div>
+                                                <div class="font-bold text-gray-700">Offline Latest</div>
+                                                <div class="text-xs text-gray-400">Versioned clustering result (latest)</div>
+                                            </div>
+                                            <button @click="loadOfflineLatest()" class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                <i class="fa-solid fa-rotate mr-1 text-gray-400"></i>Reload
+                                            </button>
+                                        </div>
+
+                                        <div class="p-4 space-y-3">
+                                            <div v-if="!offlineLatest || !offlineLatest.version" class="text-sm text-gray-400 italic">
+                                                No offline result yet. Click "Auto Window & Run".
+                                            </div>
+
+                                            <div v-else class="grid grid-cols-12 gap-3 text-xs">
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">Version</div>
+                                                    <div class="font-mono">{{ offlineLatest.version }}</div>
+                                                    <div class="text-gray-400 mt-1">created_at: {{ offlineLatest.created_at }}</div>
+                                                </div>
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">Counts</div>
+                                                    <div class="mt-1">points: <b>{{ offlineLatest.n_points }}</b></div>
+                                                    <div>clusters: <b>{{ offlineLatest.n_clusters }}</b></div>
+                                                    <div>noise: <b>{{ offlineLatest.n_noise }}</b></div>
+                                                </div>
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">Method</div>
+                                                    <div class="mt-1">{{ offlineLatest.method }}</div>
+                                                    <div class="font-mono text-[11px] text-gray-400 mt-1 line-clamp-2">
+                                                        {{ JSON.stringify(offlineLatest.params || {}) }}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- Cluster list -->
+                                            <div v-if="offlineClustersList.length > 0" class="border rounded bg-white">
+                                                <div class="p-3 border-b bg-gray-50 flex items-center justify-between">
+                                                    <div class="font-bold text-gray-700 text-sm">Clusters</div>
+                                                    <input v-model="offlineClusterFilter" placeholder="filter by id/preview..."
+                                                           class="text-xs p-2 border rounded w-64 bg-white"/>
+                                                </div>
+
+                                                <div class="max-h-[360px] overflow-y-auto scroller divide-y">
+                                                    <div v-for="c in filteredOfflineClusters" :key="c.cluster_id"
+                                                         class="p-3 hover:bg-gray-50 cursor-pointer"
+                                                         :class="selectedOfflineClusterId===c.cluster_id ? 'bg-indigo-50' : ''"
+                                                         @click="selectOfflineCluster(c.cluster_id)">
+                                                        <div class="flex items-center justify-between">
+                                                            <span class="font-mono text-xs text-indigo-700 font-bold">{{ c.cluster_id }}</span>
+                                                            <span class="text-xs bg-gray-100 border rounded px-2 py-0.5 text-gray-600">
+                                                                {{ c.size }} docs
+                                                            </span>
+                                                        </div>
+                                                        <div class="text-xs text-gray-600 mt-1 line-clamp-2">
+                                                            {{ c.repr_preview }}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- Cluster detail -->
+                                            <div v-if="selectedOfflineCluster" class="border rounded bg-gray-50 p-4">
+                                                <div class="flex items-center justify-between mb-2">
+                                                    <div class="font-bold text-gray-700">Cluster Detail: {{ selectedOfflineClusterId }}</div>
+                                                    <div class="text-xs text-gray-400">members shown: {{ selectedOfflineCluster.members.length }}</div>
+                                                </div>
+                                                <div class="grid grid-cols-12 gap-3">
+                                                    <div class="col-span-4 bg-white border rounded p-3">
+                                                        <div class="text-xs text-gray-500 font-bold">repr_doc_id</div>
+                                                        <div class="font-mono text-[11px] break-all">{{ selectedOfflineCluster.repr_doc_id }}</div>
+                                                    </div>
+                                                    <div class="col-span-8 bg-white border rounded p-3">
+                                                        <div class="text-xs text-gray-500 font-bold">members (first 200)</div>
+                                                        <div class="font-mono text-[11px] text-gray-700 max-h-32 overflow-y-auto scroller">
+                                                            <div v-for="m in selectedOfflineCluster.members.slice(0,200)" :key="m" class="truncate">
+                                                                {{ m }}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+
+                                    <!-- Online State -->
+                                    <div class="bg-white border rounded-lg shadow-sm">
+                                        <div class="p-4 border-b bg-gray-50 flex items-center justify-between">
+                                            <div>
+                                                <div class="font-bold text-gray-700">Online State</div>
+                                                <div class="text-xs text-gray-400">Incremental micro-clusters (real-time)</div>
+                                            </div>
+                                            <button @click="loadOnlineState()" class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                <i class="fa-solid fa-rotate mr-1 text-gray-400"></i>Reload
+                                            </button>
+                                        </div>
+
+                                        <div class="p-4 space-y-3">
+                                            <div v-if="!onlineState || !onlineState.plan_id" class="text-sm text-gray-400 italic">
+                                                Online state not available yet.
+                                            </div>
+
+                                            <div v-else class="grid grid-cols-12 gap-3 text-xs">
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">base_version</div>
+                                                    <div class="font-mono">{{ onlineState.base_version || 'None' }}</div>
+                                                    <div class="text-gray-400 mt-1">updated_at: {{ onlineState.updated_at }}</div>
+                                                </div>
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">Counts</div>
+                                                    <div class="mt-1">clusters: <b>{{ onlineClustersCount }}</b></div>
+                                                    <div>mapped docs: <b>{{ onlineDocCount }}</b></div>
+                                                </div>
+                                                <div class="col-span-4 bg-gray-50 border rounded p-3">
+                                                    <div class="text-gray-500 font-bold">Hint</div>
+                                                    <div class="text-gray-600 mt-1">
+                                                        Insert new docs to see online clusters update.
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div v-if="onlineClustersCount > 0" class="border rounded bg-white">
+                                                <div class="p-3 border-b bg-gray-50 flex items-center justify-between">
+                                                    <div class="font-bold text-gray-700 text-sm">Clusters</div>
+                                                    <input v-model="onlineClusterFilter" placeholder="filter online cluster..."
+                                                           class="text-xs p-2 border rounded w-64 bg-white"/>
+                                                </div>
+                                                <div class="max-h-[260px] overflow-y-auto scroller divide-y">
+                                                    <div v-for="c in filteredOnlineClusters" :key="c.cluster_id"
+                                                         class="p-3 hover:bg-gray-50">
+                                                        <div class="flex items-center justify-between">
+                                                            <span class="font-mono text-xs font-bold"
+                                                                  :class="c.cluster_id.startsWith('online_') ? 'text-orange-600' : 'text-indigo-700'">
+                                                                {{ c.cluster_id }}
+                                                            </span>
+                                                            <span class="text-xs bg-gray-100 border rounded px-2 py-0.5 text-gray-600">
+                                                                {{ c.size }} docs
+                                                            </span>
+                                                        </div>
+                                                        <div class="text-xs text-gray-600 mt-1 line-clamp-1">
+                                                            {{ c.repr_preview || '' }}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Plan Modal -->
+                    <div v-if="showPlanModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" v-cloak>
+                        <div class="bg-white rounded-lg p-6 w-[520px] shadow-xl space-y-4">
+                            <div class="flex items-center justify-between border-b pb-2">
+                                <h3 class="text-lg font-bold">Create / Edit Plan</h3>
+                                <button @click="showPlanModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <i class="fa-solid fa-times"></i>
+                                </button>
+                            </div>
+
+                            <div class="space-y-3 text-sm">
+                                <div>
+                                    <label class="block text-xs font-bold text-gray-500 mb-1">plan_id</label>
+                                    <input v-model="planForm.plan_id" :disabled="planForm.mode==='edit'"
+                                           class="w-full p-2 border rounded font-mono text-xs bg-gray-50"/>
+                                    <div class="text-[11px] text-gray-400 mt-1">
+                                        For 1-plan-per-collection mode, edit will reuse existing plan_id.
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-xs font-bold text-gray-500 mb-1">collection_name</label>
+                                    <input v-model="planForm.collection_name" disabled class="w-full p-2 border rounded font-mono text-xs bg-gray-50"/>
+                                </div>
+
+                                <div class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-6">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">method</label>
+                                        <select v-model="planForm.method" class="w-full p-2 border rounded text-xs bg-white">
+                                            <option value="hdbscan">hdbscan</option>
+                                            <option value="dbscan">dbscan</option>
+                                            <option value="agglomerative_threshold">agglomerative_threshold</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">window(h)</label>
+                                        <input v-model.number="planForm.window_h" type="number" min="1" class="w-full p-2 border rounded text-xs text-center"/>
+                                    </div>
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">max_points</label>
+                                        <input v-model.number="planForm.max_points" type="number" min="100" class="w-full p-2 border rounded text-xs text-center"/>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-xs font-bold text-gray-500 mb-1">params (JSON)</label>
+                                    <textarea v-model="planForm.params_json" rows="4"
+                                              class="w-full p-2 border rounded json-input bg-gray-50"></textarea>
+                                </div>
+
+                                <div class="flex items-center justify-between">
+                                    <label class="flex items-center space-x-2 text-xs text-gray-600">
+                                        <input type="checkbox" v-model="planForm.enable_online"/>
+                                        <span>enable_online</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 text-xs text-gray-600">
+                                        <input type="checkbox" v-model="planForm.persist"/>
+                                        <span>persist (reserved)</span>
+                                    </label>
+                                </div>
+
+                                <div class="flex justify-end space-x-3 pt-2">
+                                    <button v-if="planForm.mode==='edit'" @click="deletePlanConfirm()"
+                                            class="px-3 py-2 text-red-600 hover:bg-red-50 rounded text-sm border">
+                                        Delete
+                                    </button>
+                                    <button @click="savePlanFromModal()"
+                                            class="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm font-medium">
+                                        Save
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -502,6 +880,37 @@
                     reduce_params: { n_neighbors: 15, min_dist: 0.1 }
                 });
 
+                // --------------------
+                // Aggregation (NEW)
+                // --------------------
+                const aggregationPlans = ref([]);        // all plans
+                const selectedPlanId = ref('');
+                const offlineLatest = ref(null);
+                const onlineState = ref(null);
+
+                const aggTimeRange = ref({ start: null, end: null });
+                const aggregationTimeField = ref('timestamp');
+
+                const aggJob = ref({ status: 'idle', jobId: null, error: null });
+
+                const offlineClusterFilter = ref('');
+                const selectedOfflineClusterId = ref('');
+
+                const onlineClusterFilter = ref('');
+
+                const showPlanModal = ref(false);
+                const planForm = ref({
+                    mode: 'create', // create | edit
+                    plan_id: '',
+                    collection_name: '',
+                    method: 'hdbscan',
+                    window_h: 24,
+                    max_points: 50000,
+                    enable_online: true,
+                    persist: true,
+                    params_json: JSON.stringify({ min_cluster_size: 3, min_samples: 2 }, null, 2),
+                });
+
                 // --- Computed ---
                 const activeClusterItems = computed(() => {
                     if (activeCluster.value === null) return [];
@@ -509,6 +918,64 @@
                         .filter(p => p.cluster === activeCluster.value)
                         .slice(0, 100);
                 });
+
+                // --- Aggregation Computed ---
+                const aggregationFilteredPlans = computed(() => {
+                    if (!selectedCollection.value) return [];
+                    return (aggregationPlans.value || []).filter(p => p.collection_name === selectedCollection.value);
+                });
+
+                const offlineClustersList = computed(() => {
+                    const r = offlineLatest.value;
+                    if (!r || !r.clusters) return [];
+                    // offlineLatest.clusters is an object: {cluster_0:{...}, cluster_1:{...}}
+                    return Object.keys(r.clusters).map(k => ({
+                        cluster_id: k,
+                        size: r.clusters[k].size || 0,
+                        repr_preview: r.clusters[k].repr_preview || '',
+                        repr_doc_id: r.clusters[k].repr_doc_id || '',
+                        members: r.clusters[k].members || []
+                    })).sort((a,b) => b.size - a.size);
+                });
+
+                const filteredOfflineClusters = computed(() => {
+                    const q = (offlineClusterFilter.value || '').trim().toLowerCase();
+                    if (!q) return offlineClustersList.value;
+                    return offlineClustersList.value.filter(c =>
+                        c.cluster_id.toLowerCase().includes(q) ||
+                        (c.repr_preview || '').toLowerCase().includes(q)
+                    );
+                });
+
+                const selectedOfflineCluster = computed(() => {
+                    const id = selectedOfflineClusterId.value;
+                    if (!id) return null;
+                    const list = offlineClustersList.value;
+                    return list.find(x => x.cluster_id === id) || null;
+                });
+
+                const onlineClustersList = computed(() => {
+                    const st = onlineState.value;
+                    if (!st || !st.clusters) return [];
+                    return Object.keys(st.clusters).map(k => ({
+                        cluster_id: k,
+                        size: st.clusters[k].size || 0,
+                        repr_preview: st.clusters[k].repr_preview || '',
+                        last_seen: st.clusters[k].last_seen || null
+                    })).sort((a,b) => b.size - a.size);
+                });
+
+                const filteredOnlineClusters = computed(() => {
+                    const q = (onlineClusterFilter.value || '').trim().toLowerCase();
+                    if (!q) return onlineClustersList.value;
+                    return onlineClustersList.value.filter(c =>
+                        c.cluster_id.toLowerCase().includes(q) ||
+                        (c.repr_preview || '').toLowerCase().includes(q)
+                    );
+                });
+
+                const onlineClustersCount = computed(() => (onlineState.value && onlineState.value.clusters) ? Object.keys(onlineState.value.clusters).length : 0);
+                const onlineDocCount = computed(() => (onlineState.value && onlineState.value.doc_to_cluster) ? Object.keys(onlineState.value.doc_to_cluster).length : 0);
 
                 // --- Helpers ---
                 const showToast = (msg, type = 'success') => {
@@ -555,6 +1022,248 @@
                             loadCollection();
                         } else showToast(data.error, "error");
                     } catch(e) { showToast("Network Error", "error"); }
+                };
+
+                // --------------------
+                // Aggregation API (NEW)
+                // --------------------
+
+                const refreshAggregationPlans = async () => {
+                    try {
+                        const res = await fetch('api/aggregation/plans');
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Failed to load plans');
+                        aggregationPlans.value = data.plans || [];
+
+                        // auto select a plan for current collection
+                        if (selectedCollection.value) {
+                            const list = aggregationPlans.value.filter(p => p.collection_name === selectedCollection.value);
+                            if (list.length > 0 && !selectedPlanId.value) {
+                                selectPlan(list[0].plan_id);
+                            }
+                        }
+                    } catch (e) {
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const initAggregationTab = async () => {
+                    if (!selectedCollection.value) {
+                        showToast('Please select a collection first.', 'error');
+                        return;
+                    }
+                    await refreshAggregationPlans();
+                };
+
+                const selectPlan = async (planId) => {
+                    selectedPlanId.value = planId;
+                    selectedOfflineClusterId.value = '';
+                    offlineLatest.value = null;
+                    onlineState.value = null;
+                    aggJob.value = { status: 'idle', jobId: null, error: null };
+                    aggTimeRange.value = { start: null, end: null };
+                    await refreshSelectedPlanViews();
+                };
+
+                const refreshSelectedPlanViews = async () => {
+                    if (!selectedPlanId.value) return;
+                    await Promise.all([loadOfflineLatest(), loadOnlineState()]);
+                };
+
+                const loadOfflineLatest = async () => {
+                    if (!selectedPlanId.value) return;
+                    try {
+                        const res = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/offline/latest`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Failed to load offline latest');
+                        offlineLatest.value = data || null;
+                    } catch (e) {
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const loadOnlineState = async () => {
+                    if (!selectedPlanId.value) return;
+                    try {
+                        const res = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/online/state`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Failed to load online state');
+                        onlineState.value = data || null;
+                    } catch (e) {
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const selectOfflineCluster = (clusterId) => {
+                    selectedOfflineClusterId.value = clusterId;
+                };
+
+                const autoPickTimeRangeAndRun = async () => {
+                    if (!selectedPlanId.value) return;
+                    if (!selectedCollection.value) return;
+
+                    aggJob.value = { status: 'processing', jobId: null, error: null };
+
+                    try {
+                        // 1) load plan details to know window size
+                        const plan = (aggregationPlans.value || []).find(p => p.plan_id === selectedPlanId.value);
+                        const windowSec = plan ? (plan.time_window_sec || 24*3600) : (24*3600);
+
+                        // 2) timestamp_stats to find max_ts
+                        const tsRes = await fetch(`api/collections/${encodeURIComponent(selectedCollection.value)}/timestamp_stats?time_field=${encodeURIComponent(aggregationTimeField.value)}&scan_limit=20000`);
+                        const tsData = await tsRes.json();
+                        if (!tsRes.ok) throw new Error(tsData.error || 'timestamp_stats failed');
+
+                        let end = tsData.max_ts;
+                        if (!end) {
+                            // fallback: now
+                            end = Date.now()/1000;
+                        }
+                        const start = end - windowSec;
+
+                        aggTimeRange.value = { start, end };
+
+                        // 3) run plan
+                        const runPayload = {
+                            time_range: [start, end],
+                            overrides: { time_field: aggregationTimeField.value }
+                        };
+                        const runRes = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/run`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(runPayload)
+                        });
+                        const runData = await runRes.json();
+                        if (runRes.status !== 202) throw new Error(runData.error || 'Failed to start run');
+
+                        aggJob.value.jobId = runData.job_id;
+                        await pollAggJob(runData.job_id);
+
+                    } catch (e) {
+                        aggJob.value = { status: 'failed', jobId: aggJob.value.jobId, error: e.message };
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const pollAggJob = async (jobId) => {
+                    const maxPoll = 180; // seconds
+                    const startT = Date.now();
+                    while ((Date.now() - startT) < maxPoll*1000) {
+                        const res = await fetch(`api/aggregation/jobs/${encodeURIComponent(jobId)}`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'poll job failed');
+
+                        const status = data.status;
+                        if (status === 'completed') {
+                            aggJob.value = { status: 'completed', jobId, error: null };
+                            showToast('Aggregation completed!', 'success');
+                            // refresh views
+                            await refreshSelectedPlanViews();
+                            return;
+                        }
+                        if (status === 'failed') {
+                            aggJob.value = { status: 'failed', jobId, error: data.error || 'failed' };
+                            showToast('Aggregation failed!', 'error');
+                            return;
+                        }
+                        // still processing
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
+                    aggJob.value = { status: 'failed', jobId, error: 'poll timeout' };
+                    showToast('Aggregation polling timeout', 'error');
+                };
+
+                // Plan modal helpers
+                const openPlanModalForCreateOrEdit = async () => {
+                    if (!selectedCollection.value) return;
+
+                    // find plan for this collection (registry default is 1 plan/collection)
+                    const list = aggregationFilteredPlans.value;
+                    if (list.length > 0) {
+                        const p = list[0];
+                        planForm.value.mode = 'edit';
+                        planForm.value.plan_id = p.plan_id;
+                        planForm.value.collection_name = p.collection_name;
+                        planForm.value.method = p.method || 'hdbscan';
+                        planForm.value.window_h = Math.round((p.time_window_sec || 86400)/3600);
+                        planForm.value.max_points = p.max_points || 50000;
+                        planForm.value.enable_online = !!p.enable_online;
+                        planForm.value.persist = !!p.persist;
+                        planForm.value.params_json = JSON.stringify(p.params || {}, null, 2);
+                    } else {
+                        planForm.value.mode = 'create';
+                        planForm.value.collection_name = selectedCollection.value;
+                        planForm.value.plan_id = `agg_${selectedCollection.value}_24h`;
+                        planForm.value.method = 'hdbscan';
+                        planForm.value.window_h = 24;
+                        planForm.value.max_points = 50000;
+                        planForm.value.enable_online = true;
+                        planForm.value.persist = true;
+                        planForm.value.params_json = JSON.stringify({ min_cluster_size: 3, min_samples: 2 }, null, 2);
+                    }
+
+                    showPlanModal.value = true;
+                };
+
+                const savePlanFromModal = async () => {
+                    try {
+                        let params = {};
+                        try {
+                            params = planForm.value.params_json.trim() ? JSON.parse(planForm.value.params_json) : {};
+                        } catch(e) {
+                            showToast('Invalid params JSON', 'error');
+                            return;
+                        }
+
+                        const payload = {
+                            plan_id: planForm.value.plan_id,
+                            collection_name: planForm.value.collection_name,
+                            time_window_sec: planForm.value.window_h * 3600,
+                            run_every_sec: 3600,
+                            method: planForm.value.method,
+                            params,
+                            max_points: planForm.value.max_points,
+                            enable_online: planForm.value.enable_online,
+                            persist: planForm.value.persist,
+                            overwrite: planForm.value.mode === 'edit'
+                        };
+
+                        const res = await fetch('api/aggregation/plans', {
+                            method: 'POST',
+                            headers: {'Content-Type':'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Save plan failed');
+
+                        showPlanModal.value = false;
+                        showToast('Plan saved!', 'success');
+                        await refreshAggregationPlans();
+
+                        // auto select
+                        if (data.plan && data.plan.plan_id) {
+                            await selectPlan(data.plan.plan_id);
+                        }
+                    } catch(e) {
+                        showToast(e.message, 'error');
+                    }
+                };
+
+                const deletePlanConfirm = async () => {
+                    if (!confirm(`Delete plan ${planForm.value.plan_id}?`)) return;
+                    try {
+                        const res = await fetch(`api/aggregation/plans/${encodeURIComponent(planForm.value.plan_id)}`, {
+                            method: 'DELETE'
+                        });
+                        const data = await res.json();
+                        if (!res.ok && res.status !== 404) throw new Error(data.error || 'Delete failed');
+                        showPlanModal.value = false;
+                        showToast('Plan deleted', 'success');
+                        selectedPlanId.value = '';
+                        await refreshAggregationPlans();
+                    } catch(e) {
+                        showToast(e.message, 'error');
+                    }
                 };
 
                 const loadCollection = async () => {
@@ -858,11 +1567,37 @@
                     }
                 });
 
+                watch(selectedCollection, async (newVal, oldVal) => {
+                    if (currentTab.value === 'aggregation') {
+                        selectedPlanId.value = '';
+                        offlineLatest.value = null;
+                        onlineState.value = null;
+                        await refreshAggregationPlans();
+                    }
+                });
+
                 return {
                     currentTab, collections, selectedCollection, stats, showCreateModal, newCollectionForm, toast,
                     browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
                     refreshCollections, createNewCollection, loadCollection, fetchDocuments, performSearch, doUpsert, deleteDoc,
                     clearCollection, downloadBackup, uploadRestore, tabClass, getScoreColor, queueStats,
+
+                    // Aggregation exports
+                    aggregationPlans, aggregationFilteredPlans, selectedPlanId,
+                    initAggregationTab, refreshAggregationPlans, selectPlan,
+
+                    offlineLatest, offlineClustersList, filteredOfflineClusters,
+                    offlineClusterFilter, selectedOfflineClusterId, selectedOfflineCluster, selectOfflineCluster,
+
+                    onlineState, onlineClustersCount, onlineDocCount,
+                    onlineClusterFilter, filteredOnlineClusters,
+
+                    aggTimeRange, aggregationTimeField, aggJob,
+                    autoPickTimeRangeAndRun, refreshSelectedPlanViews,
+                    loadOfflineLatest, loadOnlineState,
+
+                    showPlanModal, planForm,
+                    openPlanModalForCreateOrEdit, savePlanFromModal, deletePlanConfirm,
 
                     // Explore Variables (Fixed)
                     exploreConfig,
