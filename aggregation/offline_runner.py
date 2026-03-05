@@ -23,6 +23,11 @@ def _safe_preview(text: Any, n: int = 150) -> str:
     return s[:n]
 
 
+def _safe_get(results: dict, key: str, default):
+    v = results.get(key, None)
+    return default if v is None else v
+
+
 class OfflineClusterRunner(OfflineRunner):
     """
     Real offline clustering runner.
@@ -58,19 +63,26 @@ class OfflineClusterRunner(OfflineRunner):
         filter_criteria = overrides.get("filter_criteria", plan.filter_criteria or {})
         limit = int(overrides.get("limit", plan.limit))
         max_points = int(overrides.get("max_points", plan.max_points))
+        time_field = overrides.get("time_field") or plan.time_field or "timestamp"
 
         # Fetch chunk-level records
         results = repo.fetch_for_analysis(
             filter_criteria=filter_criteria,
             time_range=time_range,
-            limit=limit
+            limit=limit,
+            time_field=time_field,
         )
-        ids = results.get("ids") or []
-        embs = results.get("embeddings") or []
-        metas = results.get("metadatas") or []
-        docs = results.get("documents") or []
 
-        if not ids or not embs:
+        ids = _safe_get(results, "ids", [])
+        embs = _safe_get(results, "embeddings", [])
+        metas = _safe_get(results, "metadatas", [])
+        docs = _safe_get(results, "documents", [])
+
+        # ---- SAFE emptiness checks (ids/embs may be numpy arrays) ----
+        ids_empty = (ids is None) or (len(ids) == 0)
+        embs_empty = (embs is None) or (len(embs) == 0)
+
+        if ids_empty or embs_empty:
             out = self._empty_result(plan, time_range, overrides)
             self.store.save_offline(plan.plan_id, out)
             return out
@@ -86,7 +98,8 @@ class OfflineClusterRunner(OfflineRunner):
             if not g["preview"]:
                 g["preview"] = _safe_preview(docs[i])
             # last_seen: if time_field present
-            ts = meta.get(plan.time_field)
+            # ts = meta.get(plan.time_field)
+            ts = meta.get(time_field)
             try:
                 ts = float(ts) if ts is not None else None
             except Exception:

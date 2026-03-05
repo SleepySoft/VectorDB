@@ -1048,37 +1048,53 @@ class VectorCollectionRepo:
         except (json.JSONDecodeError, TypeError):
             return value
 
-    def fetch_for_analysis(self,
-                           filter_criteria: Dict[str, Any],
-                           time_range: Optional[Tuple[float, float]],
-                           limit: int) -> Dict[str, Any]:
+    def fetch_for_analysis(
+            self,
+            filter_criteria: Dict[str, Any],
+            time_range: Optional[Tuple[float, float]],
+            limit: int,
+            time_field: str = "timestamp",
+    ) -> Dict[str, Any]:
         """
-        Public Interface used by IntelligenceAnalysisPipeline to retrieve raw data.
-        Does not perform any calculation.
+        Fetch raw records for analysis (embeddings + metadatas + documents + ids).
+        NOTE: Chroma where filter requires that operator dict has exactly ONE operator.
+              For a range query (gte & lte), must use $and with two separate clauses.
         """
-        criteria = filter_criteria.copy()
+        criteria = (filter_criteria or {}).copy()
+        where = None
 
-        # Merge time range into criteria if provided
+        # Build time range expression correctly for Chroma:
+        # { "$and": [ {"timestamp":{"$gte":start}}, {"timestamp":{"$lte":end}}, ... ] }
         if time_range:
             start, end = time_range
-            # Assuming metadata field is named 'timestamp'
-            if "timestamp" in criteria:
-                # Merge with existing logic if complex
-                pass
+
+            time_and = [
+                {time_field: {"$gte": float(start)}},
+                {time_field: {"$lte": float(end)}},
+            ]
+
+            if not criteria:
+                where = {"$and": time_and}
             else:
-                criteria["timestamp"] = {"$gte": start, "$lte": end}
+                # If criteria already uses $and/$or, wrap it safely
+                # Chroma expects where to have exactly one top-level operator OR field map
+                # so we combine everything under $and.
+                where = {"$and": time_and + [criteria]}
+
+        else:
+            # no time range
+            where = criteria if criteria else None
 
         try:
-            # Direct call to ChromaDB
             results = self._collection.get(
-                where=criteria if criteria else None,  # Empty dict means no filter
+                where=where,
                 limit=limit,
-                include=['embeddings', 'metadatas', 'documents', 'ids']
+                include=["embeddings", "metadatas", "documents"]
             )
             return results
         except Exception as e:
             logger.error(f"DB Fetch failed: {e}")
-            return {}
+            return {"error": str(e)}
 
     def run_analysis(self, config: AnalysisConfig) -> Dict[str, Any]:
         """

@@ -484,12 +484,51 @@
                                             </div>
                                         </div>
 
-                                        <!-- Time range preview -->
-                                        <div class="text-xs text-gray-600 bg-gray-50 border rounded p-3">
+                                        <!-- Time range preview + time_field selector -->
+                                        <div class="text-xs text-gray-600 bg-gray-50 border rounded p-3 space-y-2">
                                             <div class="flex items-center justify-between">
                                                 <span class="font-bold text-gray-500">Time Range (for offline run)</span>
-                                                <span class="text-gray-400">time_field: {{ aggregationTimeField }}</span>
+
+                                                <div class="flex items-center space-x-2">
+                                                    <button @click="detectTimeFields()"
+                                                            class="text-[11px] px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                        <i class="fa-solid fa-wand-magic-sparkles mr-1 text-gray-400"></i>Detect Fields
+                                                    </button>
+
+                                                    <span class="text-gray-400">time_field</span>
+                                                </div>
                                             </div>
+
+                                            <div class="grid grid-cols-12 gap-2 items-center">
+                                                <div class="col-span-6">
+                                                    <select v-model="selectedTimeFieldOption"
+                                                            class="w-full text-xs p-2 border rounded bg-white">
+                                                        <option value="" disabled>-- Select field --</option>
+                                                        <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">
+                                                            {{ f.key }}  ({{ f.count }})
+                                                        </option>
+                                                        <option value="__custom__">Custom...</option>
+                                                    </select>
+                                                    <div class="text-[11px] text-gray-400 mt-1">
+                                                        Candidates are sampled from metadata keys of this collection.
+                                                    </div>
+                                                </div>
+
+                                                <div class="col-span-6">
+                                                    <input v-if="selectedTimeFieldOption === '__custom__'"
+                                                           v-model="aggregationTimeField"
+                                                           placeholder="e.g. pub_timestamp / archived_timestamp / timestamp"
+                                                           class="w-full text-xs p-2 border rounded font-mono bg-white"/>
+                                                    <input v-else
+                                                           v-model="aggregationTimeField"
+                                                           class="w-full text-xs p-2 border rounded font-mono bg-gray-100 text-gray-500"
+                                                           readonly />
+                                                    <div class="text-[11px] text-gray-400 mt-1">
+                                                        Current: <b class="font-mono">{{ aggregationTimeField }}</b>
+                                                    </div>
+                                                </div>
+                                            </div>
+
                                             <div class="mt-1 font-mono text-[11px]">
                                                 start: {{ aggTimeRange.start || 'N/A' }}<br/>
                                                 end:   {{ aggTimeRange.end || 'N/A' }}
@@ -712,6 +751,24 @@
                                     </div>
                                 </div>
 
+                                <div class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-6">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">time_field</label>
+                                        <select v-model="planForm.time_field"
+                                                class="w-full p-2 border rounded text-xs bg-white">
+                                            <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">{{ f.key }}</option>
+                                            <option value="__custom__">Custom...</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-span-6">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">custom_time_field</label>
+                                        <input v-model="planForm.custom_time_field"
+                                               :disabled="planForm.time_field !== '__custom__'"
+                                               placeholder="e.g. pub_timestamp"
+                                               class="w-full p-2 border rounded text-xs font-mono bg-white disabled:bg-gray-100"/>
+                                    </div>
+                                </div>
+
                                 <div>
                                     <label class="block text-xs font-bold text-gray-500 mb-1">params (JSON)</label>
                                     <textarea v-model="planForm.params_json" rows="4"
@@ -890,6 +947,9 @@
 
                 const aggTimeRange = ref({ start: null, end: null });
                 const aggregationTimeField = ref('timestamp');
+                // --- time field candidate discovery ---
+                const timeFieldCandidates = ref([]);            // [{key, count}]
+                const selectedTimeFieldOption = ref('timestamp');  // dropdown selection
 
                 const aggJob = ref({ status: 'idle', jobId: null, error: null });
 
@@ -909,6 +969,8 @@
                     enable_online: true,
                     persist: true,
                     params_json: JSON.stringify({ min_cluster_size: 3, min_samples: 2 }, null, 2),
+                    time_field: 'timestamp',
+                    custom_time_field: '',
                 });
 
                 // --- Computed ---
@@ -1053,6 +1115,63 @@
                         return;
                     }
                     await refreshAggregationPlans();
+                    await detectTimeFields();
+                };
+
+                const detectTimeFields = async () => {
+                    if (!selectedCollection.value) return;
+
+                    // 1) 优先：从 browse 接口抽样（最小侵入，不需要后端新增接口）
+                    // 扫描 3 页，每页 50 条（可调）
+                    const samplePages = 3;
+                    const limit = 50;
+                    const freq = new Map();
+
+                    try {
+                        for (let p = 0; p < samplePages; p++) {
+                            const offset = p * limit;
+                            const res = await fetch(`api/collections/${encodeURIComponent(selectedCollection.value)}/documents?limit=${limit}&offset=${offset}`);
+                            const data = await res.json();
+                            if (!res.ok) break;
+
+                            const items = data.items || [];
+                            if (items.length === 0) break;
+
+                            for (const it of items) {
+                                const md = it.metadata || {};
+                                for (const k of Object.keys(md)) {
+                                    freq.set(k, (freq.get(k) || 0) + 1);
+                                }
+                            }
+
+                            // 如果这一页不足 limit，说明到尾了
+                            if (items.length < limit) break;
+                        }
+
+                        // 2) 排序：出现次数高的优先，且把包含 "timestamp/time/date" 的字段适当提前（更像时间字段）
+                        const arr = Array.from(freq.entries()).map(([key, count]) => ({ key, count }));
+                        arr.sort((a, b) => {
+                            const aHint = /time|timestamp|date/i.test(a.key) ? 1 : 0;
+                            const bHint = /time|timestamp|date/i.test(b.key) ? 1 : 0;
+                            if (aHint !== bHint) return bHint - aHint;
+                            return b.count - a.count;
+                        });
+
+                        timeFieldCandidates.value = arr.slice(0, 30);  // 最多展示 30 个候选
+
+                        // 3) 默认选项：如果当前 aggregationTimeField 仍在候选里，保持；否则自动选第一个
+                        const exists = timeFieldCandidates.value.some(x => x.key === aggregationTimeField.value);
+                        if (!exists && timeFieldCandidates.value.length > 0) {
+                            selectedTimeFieldOption.value = timeFieldCandidates.value[0].key;
+                            aggregationTimeField.value = selectedTimeFieldOption.value;
+                        } else {
+                            selectedTimeFieldOption.value = aggregationTimeField.value;
+                        }
+
+                        showToast(`Detected ${timeFieldCandidates.value.length} metadata fields`, 'success');
+                    } catch (e) {
+                        showToast(`Detect fields failed: ${e.message}`, 'error');
+                    }
                 };
 
                 const selectPlan = async (planId) => {
@@ -1215,6 +1334,12 @@
                             return;
                         }
 
+                        const tf = (planForm.value.time_field === '__custom__')
+                          ? (planForm.value.custom_time_field || '').trim()
+                          : planForm.value.time_field;
+
+                        if (!tf) { showToast('time_field is required', 'error'); return; }
+
                         const payload = {
                             plan_id: planForm.value.plan_id,
                             collection_name: planForm.value.collection_name,
@@ -1225,7 +1350,8 @@
                             max_points: planForm.value.max_points,
                             enable_online: planForm.value.enable_online,
                             persist: planForm.value.persist,
-                            overwrite: planForm.value.mode === 'edit'
+                            overwrite: planForm.value.mode === 'edit',
+                            time_field: tf
                         };
 
                         const res = await fetch('api/aggregation/plans', {
@@ -1576,6 +1702,16 @@
                     }
                 });
 
+                watch(selectedTimeFieldOption, (v) => {
+                    if (!v) return;
+                    if (v === '__custom__') {
+                        // keep aggregationTimeField editable
+                        if (!aggregationTimeField.value) aggregationTimeField.value = '';
+                        return;
+                    }
+                    aggregationTimeField.value = v;
+                });
+
                 return {
                     currentTab, collections, selectedCollection, stats, showCreateModal, newCollectionForm, toast,
                     browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
@@ -1598,6 +1734,8 @@
 
                     showPlanModal, planForm,
                     openPlanModalForCreateOrEdit, savePlanFromModal, deletePlanConfirm,
+
+                    timeFieldCandidates, selectedTimeFieldOption, detectTimeFields,
 
                     // Explore Variables (Fixed)
                     exploreConfig,
