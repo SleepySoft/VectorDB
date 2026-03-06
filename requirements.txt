@@ -6,3 +6,4 @@ requests
 chromadb
 sentence-transformers
 hdbscan
+prompt_toolkit

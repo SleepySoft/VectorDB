@@ -85,9 +85,11 @@ class ClusterManager:
         offline_runner_factory: Callable[[Any], OfflineRunner],
         online_handler_factory: Optional[Callable[[Any, AggregationPlan], OnlineHandler]] = None,
         max_workers: int = 2,
+        store: Optional[Any] = None,
     ):
         self._engine = engine
         self._registry = registry
+        self.store = store
 
         self._offline_runner = offline_runner_factory(engine)
         self._online_handler_factory = online_handler_factory

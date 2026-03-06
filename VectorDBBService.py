@@ -1,3 +1,5 @@
+# VectorDB/VectorDBService.py
+
 import os
 import time
 import traceback
@@ -21,9 +23,11 @@ from VectorDB.aggregation.online_microcluster import OnlineMicroClusterManager
 try:
     from VectorStorageEngine import VectorStorageEngine
     from ClusterAnalysisPipeline import AnalysisConfig
+    from aggregation.json_persistence import JsonAggregationStore
 except ImportError:
     from .VectorStorageEngine import VectorStorageEngine
     from .ClusterAnalysisPipeline import AnalysisConfig
+    from .aggregation.json_persistence import JsonAggregationStore
 
 # Configure Logger
 logging.basicConfig(level=logging.INFO)
@@ -835,6 +839,56 @@ class VectorDBService:
                 "items": out
             })
 
+        @route("/api/aggregation/plans/<plan_id>/manifest", methods=["GET"])
+        def agg_plan_manifest(plan_id):
+            """
+            Get manifest for a plan (history index).
+
+            Query params (optional):
+              - since: float epoch seconds
+              - until: float epoch seconds
+              - limit: int
+              - offset: int
+              - desc: 1/0 (default 1)
+            """
+            if not self.cluster_mgr or not hasattr(self.cluster_mgr, "store") or self.cluster_mgr.store is None:
+                return jsonify({"error": "store not configured"}), 501
+
+            store = self.cluster_mgr.store
+
+            # store must provide get_manifest; if not, return 501
+            if not hasattr(store, "get_manifest"):
+                return jsonify({"error": "manifest not supported by current store"}), 501
+
+            try:
+                since = request.args.get("since")
+                until = request.args.get("until")
+                limit = request.args.get("limit")
+                offset = request.args.get("offset", "0")
+                desc = request.args.get("desc", "1")
+
+                since_f = float(since) if since not in (None, "") else None
+                until_f = float(until) if until not in (None, "") else None
+                limit_i = int(limit) if limit not in (None, "") else None
+                offset_i = int(offset or 0)
+                descending = desc in ("1", "true", "True", "yes", "Y", "y")
+
+                manifest = store.get_manifest(
+                    plan_id,
+                    since=since_f,
+                    until=until_f,
+                    limit=limit_i,
+                    offset=offset_i,
+                    descending=descending
+                )
+                if not manifest:
+                    return jsonify({"error": "manifest not found", "plan_id": plan_id}), 404
+
+                return jsonify(manifest)
+
+            except Exception as e:
+                return jsonify({"error": str(e), "plan_id": plan_id}), 500
+
         return bp
 
     def _run_analysis_task(self, job_id: str, collection_name: str, config_payload: Dict[str, Any]):
@@ -904,17 +958,6 @@ class VectorDBService:
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-store = InMemoryAggregationStore()
-
-
-def offline_runner_factory(engine):
-    return OfflineClusterRunner(engine, store)
-
-
-def online_handler_factory(engine, plan):
-    return OnlineMicroClusterManager(engine, plan, store)
-
-
 def main():
     # --- Configuration Logic ---
     parser = argparse.ArgumentParser(description="VectorDB Standalone Service")
@@ -938,6 +981,11 @@ def main():
                         default=os.getenv("VECTOR_MODEL", DEFAULT_MODEL),
                         help=f"SentenceTransformer model name (default: {DEFAULT_MODEL} or env VECTOR_MODEL)")
 
+    # 4. Aggregation persistence dir
+    parser.add_argument("--agg-store-dir", type=str,
+                        default=os.getenv("VECTOR_AGG_STORE_DIR", "./aggregation_store"),
+                        help="Directory to persist aggregation offline results (default: ./aggregation_store)")
+
     args = parser.parse_args()
 
     print("=" * 50)
@@ -945,12 +993,12 @@ def main():
     print(f" - Host:      {args.host}:{args.port}")
     print(f" - DB Path:   {args.db_path}")
     print(f" - Model:     {args.model}")
+    print(f" - AggStore:  {args.agg_store_dir}")
     print("=" * 50)
 
     # --- Initialization ---
 
     # 1. Initialize Engine with Config
-    # Note: ensure directory exists or let Chroma create it
     os.makedirs(args.db_path, exist_ok=True)
 
     engine_instance = VectorStorageEngine(
@@ -958,6 +1006,25 @@ def main():
         model_name=args.model
     )
 
+    # 2. Aggregation Store (JSON persistence)
+    from VectorDB.aggregation.json_persistence import JsonAggregationStore
+
+    store = JsonAggregationStore(
+        base_dir=args.agg_store_dir,
+        write_full_gzip=True,   # 可选：生成压缩 full 快照
+        keep_full=True          # 可选：保留 full 快照（未来回放/调试）
+    )
+    # 启动仅加载 latest（当前需求）
+    store.load_latest_only()
+
+    # 3. Factories (capture store)
+    def offline_runner_factory(engine):
+        return OfflineClusterRunner(engine, store)
+
+    def online_handler_factory(engine, plan):
+        return OnlineMicroClusterManager(engine, plan, store)
+
+    # 4. Cluster manager
     registry = AggregationRegistry(max_plans=3, max_plans_per_collection=1)
 
     cluster_mgr = ClusterManager(
@@ -965,7 +1032,8 @@ def main():
         registry=registry,
         offline_runner_factory=offline_runner_factory,
         online_handler_factory=online_handler_factory,
-        max_workers=2
+        max_workers=2,
+        store=store,
     )
 
     # 注册一个 plan（仅绑定 collection，不关心里面是什么）
@@ -981,12 +1049,11 @@ def main():
         online_params={"T_event": 0.85, "T_dup": 0.95}
     )
     cluster_mgr.register_plan(plan)
-    cluster_mgr.store = store           # TODO: Temporary
 
-    # 2. Initialize Service
+    # 5. Initialize Service
     service = VectorDBService(engine=engine_instance, cluster_mgr=cluster_mgr)
 
-    # 3. Run Standalone
+    # 6. Run Standalone
     service.run_standalone(host=args.host, port=args.port, debug=False)
 
 
