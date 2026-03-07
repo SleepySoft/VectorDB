@@ -146,11 +146,13 @@ class ClusterManager:
     # Offline run APIs
     # ----------------------------
 
-    def run_offline(self, plan_id: str, async_run: bool = True, overrides: Optional[Dict[str, Any]] = None) -> Dict[
-        str, Any]:
+    def run_offline(self, plan_id: str, async_run: bool = True, overrides: Optional[Dict[str, Any]] = None
+                    ) -> dict[str, str] | None:
         plan = self._registry.get_plan(plan_id)
         if not plan:
-            raise ValueError(f"Plan not found: {plan_id}")
+            err_msg = f"Plan not found: {plan_id}"
+            logger.error(err_msg)
+            raise ValueError(err_msg)
 
         # Apply overrides by cloning plan (plan is frozen dataclass)
         plan2 = plan
@@ -287,6 +289,8 @@ class ClusterManager:
         """
         The actual offline job execution with state updates + reconcile.
         """
+        logger.info(f"Offline cluster job ({job_id}) start.")
+
         with self._lock:
             job = self._jobs.get(job_id)
             if job:
@@ -296,6 +300,8 @@ class ClusterManager:
         try:
             # Execute offline runner
             overrides = job.get("overrides") or {}
+            logger.info(f"Offline cluster job ({job_id}) overrides config: {overrides}")
+
             result = self._offline_runner.run(plan, overrides=overrides)  # must return dict
 
             version = result.get("version")
@@ -319,6 +325,7 @@ class ClusterManager:
                 except Exception as e:
                     logger.warning(f"Reconcile failed (plan={plan.plan_id}): {e}")
 
+            logger.info(f"Offline cluster job ({job_id}) finished.")
             return result
 
         except Exception as e:

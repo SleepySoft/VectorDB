@@ -194,7 +194,16 @@ class JsonAggregationStore(InMemoryAggregationStore):
             self._write_json_atomic(self._manifest_path(plan_id), manifest)
 
             # 4) latest.json overwrite
-            self._write_json_atomic(self._latest_path(plan_id), result)
+            # 修改：防御性覆盖 (空聚类不冲掉 latest)
+            # 如果新跑出来的聚类结果是空的（比如系统刚启动且恰好无新数据），
+            # 我们可以选择不更新 latest.json，保留上一次的有意义结果。
+            if int(result.get("n_clusters", 0)) > 0:
+                self._write_json_atomic(self._latest_path(plan_id), result)
+            else:
+                # 即使是空结果，也记录日志，但不冲掉 existing latest
+                import logging
+                logging.getLogger(__name__).info(
+                    f"Aggregation yielded 0 clusters for {plan_id}, skipping latest.json overwrite.")
 
     def _load_one_latest(self, plan_id: str) -> bool:
         latest_path = self._latest_path(plan_id)
@@ -203,11 +212,21 @@ class JsonAggregationStore(InMemoryAggregationStore):
         try:
             with open(latest_path, "r", encoding="utf-8") as f:
                 latest = json.load(f)
-            # Keep only latest in memory to avoid growth
-            with self._lock:
+
+            # 修改 1：使用本类定义的 _fs_lock，或者确认父类是否存在 _lock
+            # 这里保守起见，先获取锁属性
+            lock = getattr(self, '_lock', getattr(self, '_fs_lock', None))
+            if lock:
+                with lock:
+                    self._offline_versions[plan_id] = [latest]
+            else:
                 self._offline_versions[plan_id] = [latest]
+
             return True
-        except Exception:
+        except Exception as e:
+            # 修改 2：暴露出异常，方便排错
+            import logging
+            logging.getLogger(__name__).error(f"Failed to load latest.json for {plan_id}: {e}")
             return False
 
     # ----------------------------
