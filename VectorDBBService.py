@@ -1,4 +1,4 @@
-# VectorDB/VectorDBService.py
+# VectorDBService.py
 
 import os
 import time

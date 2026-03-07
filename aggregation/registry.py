@@ -40,7 +40,8 @@ class AggregationRegistry:
 
         with self._lock:
             if plan.plan_id in self._plans and not overwrite:
-                raise ValueError(f"Plan already exists: {plan.plan_id}")
+                # raise ValueError(f"Plan already exists: {plan.plan_id}")
+                return self._plans.get(plan.plan_id)
 
             # Capacity check
             if plan.plan_id not in self._plans and len(self._plans) >= self._max_plans:
