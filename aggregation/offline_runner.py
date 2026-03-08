@@ -154,7 +154,58 @@ class OfflineClusterRunner(OfflineRunner):
         return out
 
     def _cluster(self, X: np.ndarray, method: str, params: Dict[str, Any]) -> np.ndarray:
+        """
+        Executes the clustering algorithm on the provided normalized embedding matrix.
+
+        Args:
+            X (np.ndarray): The feature matrix, typically L2-normalized semantic embeddings
+                            of shape (n_samples, n_features).
+            method (str): The clustering algorithm identifier ("hdbscan", "dbscan",
+                          or "agglomerative_threshold").
+            params (Dict[str, Any]): Hyperparameters specific to the chosen algorithm.
+
+        Returns:
+            np.ndarray: An array of cluster labels. Noise points are labeled as -1.
+
+        Supported Algorithms & Parameters:
+
+        1. HDBSCAN ("hdbscan"):
+           Hierarchical Density-Based Spatial Clustering of Applications with Noise.
+           Best for discovering clusters of varying densities.
+           - min_cluster_size (int, default=3): The minimum size of clusters. Smaller values
+             yield more, finer clusters.
+           - min_samples (int, default=None): The number of samples in a neighborhood for a point
+             to be considered a core point. Lower values make the algorithm less conservative
+             (less noise). Defaults to `min_cluster_size` if not provided.
+           - metric (str, default="euclidean"): The distance metric. Since inputs X are
+             L2-normalized, "euclidean" behaves similarly to "cosine" but is optimized in HDBSCAN.
+           - cluster_selection_method (str, default="eom"): Determines how flat clusters are
+             extracted from the hierarchy.
+             "eom" (Excess of Mass) favors large, stable macro-clusters.
+             "leaf" extracts the smallest, most homogeneous micro-clusters at the bottom of the tree.
+           - cluster_selection_epsilon (float, default=0.0): Ensures clusters below a certain
+             distance threshold are not split.
+
+        2. DBSCAN ("dbscan"):
+           Density-Based Spatial Clustering of Applications with Noise.
+           Good for uniform density clusters; requires careful tuning of `eps`.
+           - eps (float, default=0.25): The maximum distance between two samples for one to be
+             considered as in the neighborhood of the other.
+           - min_samples (int, default=3): The number of samples in a neighborhood for a point
+             to be considered a core point.
+           - metric (str, default="cosine"): Distance metric. Cosine is standard for text embeddings.
+
+        3. Agglomerative Threshold ("agglomerative_threshold"):
+           Bottom-up hierarchical clustering with a strict distance cutoff.
+           Best for strict, predictable grouping without relying on density.
+           - distance_threshold (float, default=0.25): The linkage distance threshold above which
+             clusters will not be merged. Smaller values = more granular clusters.
+           - linkage (str, default="average"): Which distance to use between sets of observation.
+             "average" or "complete" works well for semantic grouping to avoid chaining.
+           - metric (str, default="cosine"): Distance metric.
+        """
         method = (method or "").lower().strip()
+
         if method == "hdbscan":
             try:
                 import hdbscan
@@ -163,14 +214,16 @@ class OfflineClusterRunner(OfflineRunner):
 
             min_cluster_size = int(params.get("min_cluster_size", 3))
             min_samples = params.get("min_samples", None)
-            metric = params.get("metric", "euclidean")  # "cosine" sometimes works; safe default is euclidean on normalized vectors
+            metric = params.get("metric", "euclidean")
             cluster_selection_epsilon = float(params.get("cluster_selection_epsilon", 0.0))
+            cluster_selection_method = params.get("cluster_selection_method", "eom")
 
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=min_cluster_size,
                 min_samples=min_samples,
                 metric=metric,
                 cluster_selection_epsilon=cluster_selection_epsilon,
+                cluster_selection_method=cluster_selection_method
             )
             return clusterer.fit_predict(X)
 
@@ -195,6 +248,7 @@ class OfflineClusterRunner(OfflineRunner):
                     metric=metric
                 )
             except TypeError:
+                # Fallback for older scikit-learn versions
                 model = AgglomerativeClustering(
                     n_clusters=None,
                     distance_threshold=distance_threshold,
