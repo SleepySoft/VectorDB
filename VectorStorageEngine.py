@@ -405,7 +405,8 @@ class VectorStorageEngine:
                 model=self._model,
                 collection_name=collection_name,
                 chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
+                chunk_overlap=chunk_overlap,
+                db_path=self._db_path
             )
             self._repos[collection_name] = repo
             return repo
@@ -562,7 +563,8 @@ class VectorCollectionRepo:
             model: Any,
             collection_name: str,
             chunk_size: int,
-            chunk_overlap: int
+            chunk_overlap: int,
+            db_path: str,
     ):
         """
         Initialized by VectorStorageEngine. Do not instantiate directly.
@@ -572,6 +574,7 @@ class VectorCollectionRepo:
         self._client = client
         self._model = model
         self._collection_name = collection_name
+        self._db_path = db_path
         self._current_config = {}
         self._text_splitter: Optional[RecursiveCharacterTextSplitter] = None
 
@@ -1103,13 +1106,83 @@ class VectorCollectionRepo:
         Entry point for running an analysis session.
         Creates a disposable pipeline, executes it, and returns the result.
         """
+        analysis_output_dir = os.path.dirname(self._db_path)
+        
         # Create pipeline instance (Connecting Repo <-> Pipeline)
-        pipeline = IntelligenceAnalysisPipeline(repo_interface=self, config=config)
+        pipeline = IntelligenceAnalysisPipeline(
+            repo_interface=self,
+            config=config,
+            output_base_dir=analysis_output_dir
+        )
 
         # Execute
         try:
             result = pipeline.execute()
+            try:
+                self._save_analysis_report(result)
+            except Exception as e:
+                logger.error(f"Failed to save analysis report text: {e}")
             return result
         finally:
             # Explicit cleanup if necessary, though Python GC handles it
             del pipeline
+
+    def _save_analysis_report(self, result: Dict[str, Any]):
+        """
+        将聚类分析结果保存为文本文件，放置在 DB 目录同级。
+        格式体现层次结构，仅包含标题。
+        """
+        if not result:
+            return
+
+        # 1. 确定保存路径：DB目录的同级目录
+        # 如果 self._db_path 是 ".../VectorDB/storage"，我们希望存在 ".../VectorDB/" 下
+        base_dir = os.path.dirname(self._db_path)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"Clustering_Report_{self._collection_name}_{timestamp}.txt"
+        file_path = os.path.join(base_dir, filename)
+
+        # 2. 递归写入辅助函数
+        def write_node(f, node, level=0):
+            indent = "    " * level
+
+            # 获取节点信息 (根据 Pipeline 常见的输出结构适配)
+            # 假设结构包含 'label', 'summary', 'children' 或 'items'
+            label = node.get("label") or node.get("title") or f"Cluster {node.get('id', '?')}"
+
+            # 写入当前节点标题
+            f.write(f"{indent}- {label}\n")
+
+            # 处理子节点 (Sub-clusters)
+            children = node.get("children", [])
+            for child in children:
+                write_node(f, child, level + 1)
+
+            # 处理叶子节点文档 (Documents/Items)
+            items = node.get("items", []) or node.get("documents", [])
+            for item in items:
+                # 尝试从 metadata 获取标题，如果没有则使用 ID 或截断的内容
+                meta = item.get("metadata", {})
+                title = meta.get("title") or meta.get("source") or item.get("doc_id") or "Untitled Document"
+                f.write(f"{indent}    * [DOC] {title}\n")
+
+        # 3. 执行写入
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"Analysis Report for Collection: {self._collection_name}\n")
+                f.write(f"Time: {datetime.datetime.now()}\n")
+                f.write("=" * 50 + "\n\n")
+
+                # 假设 result['clusters'] 是顶层列表
+                clusters = result.get("clusters", [])
+                if isinstance(clusters, list):
+                    for cluster in clusters:
+                        write_node(f, cluster, level=0)
+                else:
+                    # 如果 result 本身就是单个根节点
+                    write_node(f, result, level=0)
+
+            logger.info(f"Analysis report saved to: {file_path}")
+        except Exception as e:
+            logger.error(f"Error writing analysis report file: {e}")
+            raise e

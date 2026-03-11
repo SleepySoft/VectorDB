@@ -2,8 +2,8 @@ import time
 import logging
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
