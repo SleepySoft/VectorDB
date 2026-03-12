@@ -955,6 +955,9 @@ class VectorDBService:
 
 # --- Usage Examples ---
 
+# Command line reference (for IIS):
+# | Put db data in _data folder | Use local bge-m3 model | Also put aggressive data in _data |
+#  --db-path ./../_data/VectorDB --model ./../../bge-m3   --agg-store-dir ./../_data/Aggressive
 
 # ----------------------------------------------------------------------------------------------------------------------
 

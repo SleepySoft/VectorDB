@@ -1109,11 +1109,7 @@ class VectorCollectionRepo:
         analysis_output_dir = os.path.dirname(self._db_path)
         
         # Create pipeline instance (Connecting Repo <-> Pipeline)
-        pipeline = IntelligenceAnalysisPipeline(
-            repo_interface=self,
-            config=config,
-            output_base_dir=analysis_output_dir
-        )
+        pipeline = IntelligenceAnalysisPipeline(repo_interface=self, config=config)
 
         # Execute
         try:
