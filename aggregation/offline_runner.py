@@ -113,7 +113,15 @@ class OfflineClusterRunner(OfflineRunner):
         last_seen_list = []
         for d in doc_ids:
             arr = np.stack(groups[d]["embs"], axis=0)
-            v = arr.mean(axis=0)
+
+            # 方案 A：时间衰减/位置衰减加权（假设第一个 chunk 是标题/摘要，最重要的）
+            # 给 chunk 分配递减的权重，例如：1.0, 0.9, 0.8...
+            weights = np.linspace(1.0, 0.5, num=arr.shape[0])
+            v = np.average(arr, axis=0, weights=weights)
+
+            # 方案 B：Max Pooling（提取最显著的局部语义特征，防止被稀释）
+            # v = arr.max(axis=0)
+
             X.append(v)
             previews.append(groups[d]["preview"])
             last_seen_list.append(groups[d]["last_seen"])
