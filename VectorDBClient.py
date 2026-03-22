@@ -436,14 +436,21 @@ class RemoteCollection:
             return resp.json()
         return self._handle_response(resp)
 
-    def search(self, query: str, top_n: int = 5, score_threshold: float = 0.0, filter_criteria: Optional[Dict] = None) -> List[Dict]:
+    def search(
+            self,
+            query: str,
+            top_n: int = 5,
+            score_threshold: float = 0.0,
+            filter_criteria: Optional[Dict] = None,
+            timeout: int = 30,
+    ) -> List[Dict]:
         payload = {
             "query": query,
             "top_n": top_n,
             "score_threshold": score_threshold,
             "filter_criteria": filter_criteria
         }
-        resp = requests.post(f"{self.api_url}/search", json=payload, timeout=30)
+        resp = requests.post(f"{self.api_url}/search", json=payload, timeout=timeout)
         return self._handle_response(resp)
 
     def delete(self, doc_id: str) -> bool:
