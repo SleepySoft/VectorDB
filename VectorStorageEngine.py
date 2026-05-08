@@ -14,6 +14,7 @@ from enum import Enum
 from chromadb import Settings
 from typing import List, Dict, Any, Optional, Union, Tuple
 
+from VectorDB.memory_utils import memory_scope, cleanup_memory
 from VectorDB.ClusterAnalysisPipeline import IntelligenceAnalysisPipeline, AnalysisConfig
 
 
@@ -351,9 +352,10 @@ class VectorStorageEngine:
         return out
 
     def get_queue_status(self):
+        running = self._worker_thread is not None and self._worker_thread.is_alive()
         return {
             "qsize": self._queue.qsize(),
-            "status": "running" if self._worker_thread.is_alive() else "stopped"
+            "status": running
         }
 
     def get_status(self) -> Dict[str, Any]:
@@ -631,80 +633,87 @@ class VectorCollectionRepo:
         Returns:
             List[str]: The list of generated chunk IDs.
         """
-        if not text:
-            return []
-        if metadata is None:
-            metadata = {}
+        chunks = None
+        chunk_ids = None
+        chunk_metadatas = None
+        embeddings_np = None
 
-        # 1) Delete old
         try:
-            self._collection.delete(where={"original_doc_id": doc_id})
-        except Exception:
-            pass
+            if not text:
+                return []
+            if metadata is None:
+                metadata = {}
 
-        # 2) Clean metadata (keep your original behavior)
-        clean_metadata = {}
-        for k, v in metadata.items():
-            if isinstance(v, (list, dict)):
-                clean_metadata[k] = json.dumps(v, ensure_ascii=False)
-            elif isinstance(v, (str, int, float, bool)):
-                clean_metadata[k] = v
-            else:
-                clean_metadata[k] = str(v)
-
-        # 3) Split
-        chunks = self._text_splitter.split_text(text)
-        if not chunks:
-            return []
-
-        # 4) Prepare IDs & metadatas
-        chunk_ids = [f"{doc_id}#chunk_{i}" for i in range(len(chunks))]
-        chunk_metadatas = []
-        for i in range(len(chunks)):
-            meta = {
-                "original_doc_id": doc_id,
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-            }
-            meta.update(clean_metadata)
-            chunk_metadatas.append(meta)
-
-        # 5) Vectorize (np.ndarray)
-        embeddings_np = self._vectorize(chunks)  # convert_to_numpy=True in _vectorize
-        # ---- NEW: emit hook BEFORE converting to list ----
-        if on_embeddings is not None:
             try:
-                # Keep payload compact: do NOT always pass chunks (may be large)
-                payload = {
-                    "collection_name": self._collection_name,
-                    "doc_id": doc_id,
-                    "chunk_ids": chunk_ids,
-                    "embeddings": embeddings_np,  # np.ndarray
-                    "metadata": clean_metadata,
-                    "chunks_count": len(chunks),
+                self._collection.delete(where={"original_doc_id": doc_id})
+            except Exception:
+                pass
+
+            clean_metadata = {}
+            for k, v in metadata.items():
+                if isinstance(v, (list, dict)):
+                    clean_metadata[k] = json.dumps(v, ensure_ascii=False)
+                elif isinstance(v, (str, int, float, bool)):
+                    clean_metadata[k] = v
+                else:
+                    clean_metadata[k] = str(v)
+
+            chunks = self._text_splitter.split_text(text)
+            if not chunks:
+                return []
+
+            chunk_ids = [f"{doc_id}#chunk_{i}" for i in range(len(chunks))]
+
+            chunk_metadatas = []
+            total_chunks = len(chunks)
+            for i in range(total_chunks):
+                meta = {
+                    "original_doc_id": doc_id,
+                    "chunk_index": i,
+                    "total_chunks": total_chunks,
                 }
-                # Support both fn(**kwargs) and fn(dict)
+                meta.update(clean_metadata)
+                chunk_metadatas.append(meta)
+
+            embeddings_np = self._vectorize(chunks).astype(np.float32, copy=False)
+
+            if on_embeddings is not None:
                 try:
+                    payload = {
+                        "collection_name": self._collection_name,
+                        "doc_id": doc_id,
+                        "chunk_ids": chunk_ids,
+                        "embedding_shape": tuple(embeddings_np.shape),
+                        "embedding_dtype": str(embeddings_np.dtype),
+                        "metadata": clean_metadata,
+                        "chunks_count": len(chunks),
+                    }
                     on_embeddings(**payload)
-                except TypeError:
-                    on_embeddings(payload)
-            except Exception as e:
-                logger.warning(f"[VectorRepo] on_embeddings hook failed: {e}")
+                except Exception as e:
+                    logger.warning(f"[VectorRepo] on_embeddings hook failed: {e}")
 
-        # 6) Insert (Chroma expects list)
-        embeddings = embeddings_np.tolist()
+            MAX_BATCH = 256
 
-        MAX_BATCH = 5000
-        for i in range(0, len(chunk_ids), MAX_BATCH):
-            end = i + MAX_BATCH
-            self._collection.upsert(
-                ids=chunk_ids[i:end],
-                documents=chunks[i:end],
-                embeddings=embeddings[i:end],
-                metadatas=chunk_metadatas[i:end]
+            for i in range(0, len(chunk_ids), MAX_BATCH):
+                end = i + MAX_BATCH
+                self._collection.upsert(
+                    ids=chunk_ids[i:end],
+                    documents=chunks[i:end],
+                    embeddings=embeddings_np[i:end].tolist(),
+                    metadatas=chunk_metadatas[i:end]
+                )
+
+            return chunk_ids
+
+        finally:
+            embeddings_np = None
+            chunks = None
+            chunk_metadatas = None
+
+            cleanup_memory(
+                tag=f"upsert_document:{self._collection_name}:{doc_id}",
+                aggressive=False
             )
-
-        return chunk_ids
 
     def exists(self, doc_id: str) -> bool:
         """Checks if a document (any of its chunks) exists in the DB."""
@@ -791,68 +800,38 @@ class VectorCollectionRepo:
             List[Dict]: List of result objects containing doc_id, score, text, metadata.
         """
 
-        # Ensure _vectorize receives List[str], and we extract the first vector
         query_vector = self._vectorize([query_text])[0].tolist()
 
-        # Request more chunks than top_n because multiple chunks might come from same doc
-        fetch_k = top_n * 3
+        # Fetch more chunks because multiple chunks may belong to the same article.
+        fetch_k = max(top_n * 5, 20)
 
         try:
             results = self._collection.query(
                 query_embeddings=[query_vector],
                 n_results=fetch_k,
-                where=filter_criteria,  # Apply metadata filtering at DB level
+                where=filter_criteria,
                 include=["metadatas", "documents", "distances"]
             )
         except Exception as e:
             print(f"[VectorRepo] Search failed: {e}")
             return []
 
-        # Parse results
-        # Chroma returns lists of lists (batch format), we usually query one at a time.
-        if not results['ids'] or not results['ids'][0]:
+        if not results.get("ids") or not results["ids"][0]:
             return []
 
-        ids = results['ids'][0]
-        distances = results['distances'][0]
-        metadatas = results['metadatas'][0]
-        documents = results['documents'][0]
+        ids = results["ids"][0]
+        distances = results["distances"][0]
+        metadatas = results["metadatas"][0]
+        documents = results["documents"][0]
 
-        # Standardize results into a list of dicts
-        raw_candidates = []
-        for i in range(len(ids)):
-            score = 1.0 - distances[i]  # Convert distance to similarity
-
-            if score < score_threshold:
-                continue
-
-            raw_candidates.append({
-                "doc_id": metadatas[i].get("original_doc_id", "unknown"),
-                "chunk_id": ids[i],
-                "score": score,
-                "content": documents[i],
-                "metadata": metadatas[i]
-            })
-
-        # Deduplicate: Keep only the highest scoring chunk per original_doc_id
-        unique_docs_map = {}
-        for candidate in raw_candidates:
-            d_id = candidate["doc_id"]
-            if d_id not in unique_docs_map:
-                unique_docs_map[d_id] = candidate
-            else:
-                # If this chunk has a higher score than the one we already have, replace it
-                if candidate["score"] > unique_docs_map[d_id]["score"]:
-                    unique_docs_map[d_id] = candidate
-
-        # Sort by score descending and take top N
-        final_results = sorted(
-            unique_docs_map.values(),
-            key=lambda x: x["score"],
-            reverse=True
+        return self._aggregate_search_chunks_to_articles(
+            ids=ids,
+            distances=distances,
+            metadatas=metadatas,
+            documents=documents,
+            top_n=top_n,
+            score_threshold=score_threshold,
         )
-
-        return final_results[:top_n]
 
     def clear(self):
         """WARNING: Deletes all data in this collection."""
@@ -942,116 +921,404 @@ class VectorCollectionRepo:
             logger.error(f"timestamp_stats failed: {e}")
             return {"error": str(e), "time_field": time_field}
 
-    def _extract_features(self,
-                          metadatas: List[Dict],
-                          weights: Dict[str, float],
-                          time_field: str = "timestamp",
-                          includes_metas: Optional[List[str]] = None
-                          ) -> np.ndarray:
-        from sklearn.preprocessing import MinMaxScaler
-
-        # 1. Temporal Feature (保持不变，如果没有 timestamp 默认为 0)
-        times = np.array([m.get(time_field, 0) for m in metadatas]).reshape(-1, 1)
-
-        # 2. Generic Density Feature (通用密度特征)
-        # 逻辑：把 includes_metas 里提到的所有字段的信息量加起来
-        densities = []
-
-        target_keys = includes_metas if includes_metas else []
-
-        for m in metadatas:
-            score = 0
-            for key in target_keys:
-                val = m.get(key)
-
-                # 此时 val 已经被 _smart_parse_value 处理过，可能是 List, Dict, Str, Int
-                if isinstance(val, list):
-                    score += len(val)  # 列表贡献长度权重
-                elif isinstance(val, dict):
-                    score += len(val)  # 字典贡献键值对数量
-                elif isinstance(val, (int, float)):
-                    score += float(val)  # 数值直接贡献大小
-                elif val:
-                    score += 1  # 非空字符串贡献 1 分
-
-            densities.append(score)
-
-        ents = np.array(densities).reshape(-1, 1)
-
-        # Scale to [0, 1]
-        scaler = MinMaxScaler()
-        norm_times = scaler.fit_transform(times) * weights.get("time", 0.2)
-        norm_ents = scaler.fit_transform(ents) * weights.get("entities", 0.5)
-
-        return np.hstack([norm_times, norm_ents])
-
-    def _aggregate_to_articles(self,
-                               results: Dict,
-                               weights: Dict[str, float],
-                               time_field: str = "timestamp",
-                               includes_metas: Optional[List[str]] = None
-                               ):
-        doc_groups = {}
-
-        for i in range(len(results['ids'])):
-            # --- 1. 智能清洗 Metadata ---
-            raw_meta = results['metadatas'][i]
-            clean_meta = {}
-            for k, v in raw_meta.items():
-                # 只有当字段在 includes_metas 里，或者没传 includes_metas (全都要) 时，才解析
-                if includes_metas is None or k in includes_metas or k == time_field or k == "original_doc_id":
-                    clean_meta[k] = self._smart_parse_value(v)
-                else:
-                    clean_meta[k] = v
-                    # ---------------------------
-
-            d_id = clean_meta.get("original_doc_id", "unknown")
-
-            if d_id not in doc_groups:
-                doc_groups[d_id] = {
-                    "embeddings": [],
-                    "metadata": clean_meta,  # 使用清洗后的
-                    "text": results['documents'][i][:150]
-                }
-            doc_groups[d_id]["embeddings"].append(results['embeddings'][i])
-
-        article_ids = list(doc_groups.keys())
-
-        semantic_vecs = []
-        for d_id in article_ids:
-            avg_emb = np.mean(doc_groups[d_id]["embeddings"], axis=0)
-            avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-9)
-            semantic_vecs.append(avg_emb * weights.get("semantic", 1.0))
-
-        # 传递 includes_metas 给特征提取器
-        meta_features = self._extract_features(
-            metadatas=[doc_groups[d_id]["metadata"] for d_id in article_ids],
-            weights=weights,
-            time_field=time_field,
-            includes_metas=includes_metas
-        )
-
-        X = np.hstack([np.array(semantic_vecs), meta_features])
-        previews = [doc_groups[d_id]["text"] for d_id in article_ids]
-
-        return X, article_ids, previews
-
-    def _smart_parse_value(self, value: Any) -> Any:
+    def _fetch_chunks_for_analysis(
+            self,
+            filter_criteria: Optional[Dict[str, Any]],
+            time_range: Optional[Tuple[float, float]],
+            limit: int,
+            time_field: str = "timestamp",
+            include_documents: bool = True,
+            offset: int = 0,
+    ) -> Dict[str, Any]:
         """
-        尝试将字符串还原为 Python 对象（List/Dict）。
-        如果失败，或者不是字符串，则原样返回。
-        """
-        if not isinstance(value, str):
-            return value
+        Internal chunk-level fetch for analysis.
 
-        stripped = value.strip()
-        if not (stripped.startswith('[') or stripped.startswith('{')):
-            return value
+        This method talks directly to Chroma and returns raw chunk records.
+        It is intentionally private because chunk is an internal storage detail.
+
+        Public APIs should return article/document-level records instead.
+
+        Args:
+            filter_criteria:
+                Chroma metadata filter.
+                Example:
+                    {"category": "news"}
+                    {"source": {"$eq": "xxx"}}
+                    {"$and": [{"category": "news"}, {"lang": "zh"}]}
+
+            time_range:
+                Optional (start_ts, end_ts). If provided, it will be combined
+                with filter_criteria using "$and".
+
+            limit:
+                Chunk scan limit. This is NOT article limit.
+
+            time_field:
+                Metadata field used for time filtering.
+
+            include_documents:
+                Whether to fetch chunk text from Chroma.
+                For pure vector analysis, this can be False to save memory.
+
+            offset:
+                Chroma pagination offset.
+
+        Returns:
+            {
+                "unit": "chunk",
+                "ids": [...],
+                "embeddings": [...],
+                "metadatas": [...],
+                "documents": [...],      # present, maybe empty strings if not requested
+            }
+        """
+        if limit is None or limit <= 0:
+            return {
+                "unit": "chunk",
+                "ids": [],
+                "embeddings": [],
+                "metadatas": [],
+                "documents": [],
+            }
+
+        criteria = dict(filter_criteria or {})
+
+        where_clauses = []
+
+        # 1. Add time range clauses.
+        if time_range is not None:
+            start, end = time_range
+
+            if start is not None:
+                where_clauses.append({
+                    time_field: {"$gte": float(start)}
+                })
+
+            if end is not None:
+                where_clauses.append({
+                    time_field: {"$lte": float(end)}
+                })
+
+        # 2. Add user filter criteria.
+        #
+        # Important:
+        # Chroma where syntax is sensitive when combining conditions.
+        # If we have both time clauses and user criteria, wrap them under "$and".
+        if criteria:
+            where_clauses.append(criteria)
+
+        # 3. Build final Chroma where expression.
+        if not where_clauses:
+            where = None
+        elif len(where_clauses) == 1:
+            where = where_clauses[0]
+        else:
+            where = {"$and": where_clauses}
+
+        # 4. Build include fields.
+        include = ["embeddings", "metadatas"]
+        if include_documents:
+            include.append("documents")
 
         try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return value
+            results = self._collection.get(
+                where=where,
+                limit=limit,
+                offset=offset,
+                include=include,
+            )
+
+            ids = results.get("ids") or []
+
+            embeddings = results.get("embeddings", None)
+            if embeddings is None:
+                embeddings = []
+
+            metadatas = results.get("metadatas") or []
+
+            if include_documents:
+                documents = results.get("documents") or []
+            else:
+                documents = [""] * len(ids)
+
+            # Normalize lengths defensively.
+            if len(metadatas) < len(ids):
+                metadatas = metadatas + [{} for _ in range(len(ids) - len(metadatas))]
+
+            if len(documents) < len(ids):
+                documents = documents + ["" for _ in range(len(ids) - len(documents))]
+
+            return {
+                "unit": "chunk",
+                "ids": ids,
+                "embeddings": embeddings,
+                "metadatas": metadatas,
+                "documents": documents,
+            }
+
+        except Exception as e:
+            logger.error(f"DB Fetch chunks failed: {e}")
+            return {
+                "unit": "chunk",
+                "ids": [],
+                "embeddings": [],
+                "metadatas": [],
+                "documents": [],
+                "error": str(e),
+            }
+
+    def _group_chunks_by_article(
+            self,
+            ids: List[str],
+            metadatas: List[Dict[str, Any]],
+            documents: Optional[List[str]] = None,
+            embeddings: Optional[Any] = None,
+            distances: Optional[List[float]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Group chunk-level records by original_doc_id.
+
+        This is a shared internal utility used by both:
+        - analysis aggregation
+        - search aggregation
+
+        It does not decide aggregation policy.
+        """
+        if documents is None:
+            documents = [""] * len(ids)
+
+        embeddings_np = None
+        if embeddings is not None:
+            embeddings_np = np.asarray(embeddings, dtype=np.float32)
+
+        groups = {}
+
+        for i, chunk_id in enumerate(ids):
+            meta = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+
+            doc_id = meta.get("original_doc_id")
+            if not doc_id:
+                doc_id = str(chunk_id).split("#chunk_")[0]
+
+            chunk_index = meta.get("chunk_index", 0)
+            try:
+                chunk_index = int(chunk_index)
+            except Exception:
+                chunk_index = 0
+
+            if doc_id not in groups:
+                groups[doc_id] = {
+                    "doc_id": doc_id,
+                    "chunk_ids": [],
+                    "chunk_indexes": [],
+                    "metadatas": [],
+                    "documents": [],
+                    "embeddings": [],
+                    "distances": [],
+                }
+
+            g = groups[doc_id]
+            g["chunk_ids"].append(chunk_id)
+            g["chunk_indexes"].append(chunk_index)
+            g["metadatas"].append(meta)
+            g["documents"].append(documents[i] if i < len(documents) else "")
+
+            if embeddings_np is not None:
+                g["embeddings"].append(embeddings_np[i])
+
+            if distances is not None:
+                g["distances"].append(float(distances[i]))
+
+        return groups
+
+    def _aggregate_search_chunks_to_articles(
+            self,
+            ids: List[str],
+            distances: List[float],
+            metadatas: List[Dict[str, Any]],
+            documents: List[str],
+            top_n: int,
+            score_threshold: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Aggregate chunk search results into article-level search results.
+
+        Search policy:
+        - article score = max chunk similarity
+        - representative content = best matching chunk
+        - representative metadata = best matching chunk metadata
+        """
+        groups = self._group_chunks_by_article(
+            ids=ids,
+            metadatas=metadatas,
+            documents=documents,
+            distances=distances,
+        )
+
+        article_results = []
+
+        for doc_id, g in groups.items():
+            if not g["distances"]:
+                continue
+
+            # cosine distance -> similarity
+            scores = [1.0 - d for d in g["distances"]]
+            best_pos = int(np.argmax(scores))
+            best_score = float(scores[best_pos])
+
+            if best_score < score_threshold:
+                continue
+
+            best_meta = dict(g["metadatas"][best_pos]) if g["metadatas"] else {}
+            best_content = g["documents"][best_pos] if g["documents"] else ""
+            best_chunk_id = g["chunk_ids"][best_pos]
+
+            best_meta["original_doc_id"] = doc_id
+
+            article_results.append({
+                "doc_id": doc_id,
+                "chunk_id": best_chunk_id,
+                "score": best_score,
+                "content": best_content,
+                "metadata": best_meta,
+                "matched_chunk_count": len(g["chunk_ids"]),
+            })
+
+        article_results.sort(
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        return article_results[:top_n]
+
+    def _aggregate_chunks_to_articles(
+            self,
+            chunk_data: Dict[str, Any],
+            time_field: str = "timestamp",
+    ) -> Dict[str, Any]:
+        ids = chunk_data.get("ids") or []
+        embeddings = chunk_data.get("embeddings")
+        metadatas = chunk_data.get("metadatas") or []
+        documents = chunk_data.get("documents") or [""] * len(ids)
+
+        if not ids or embeddings is None:
+            return {
+                "unit": "article",
+                "ids": [],
+                "embeddings": np.empty((0, 0), dtype=np.float32),
+                "metadatas": [],
+                "documents": [],
+                "chunk_counts": [],
+                "source_chunk_ids": [],
+            }
+
+        groups = self._group_chunks_by_article(
+            ids=ids,
+            metadatas=metadatas,
+            documents=documents,
+            embeddings=embeddings,
+        )
+
+        article_ids = []
+        article_embeddings = []
+        article_metadatas = []
+        article_documents = []
+        chunk_counts = []
+
+        for doc_id, g in groups.items():
+            chunk_arr = np.asarray(g["embeddings"], dtype=np.float32)
+
+            article_emb = chunk_arr.mean(axis=0)
+
+            norm = np.linalg.norm(article_emb)
+            if norm > 0:
+                article_emb = article_emb / norm
+
+            indexes = np.asarray(g["chunk_indexes"], dtype=np.int32)
+            first_pos = int(np.argmin(indexes)) if len(indexes) > 0 else 0
+
+            base_meta = dict(g["metadatas"][first_pos]) if g["metadatas"] else {}
+            base_meta["original_doc_id"] = doc_id
+            base_meta["chunk_count"] = len(g["chunk_ids"])
+            base_meta["embedding_aggregation"] = "mean_normalized"
+
+            preview = g["documents"][first_pos] if g["documents"] else ""
+
+            article_ids.append(doc_id)
+            article_embeddings.append(article_emb.astype(np.float32, copy=False))
+            article_metadatas.append(base_meta)
+            article_documents.append(preview)
+            chunk_counts.append(len(g["chunk_ids"]))
+
+        article_embeddings_np = (
+            np.asarray(article_embeddings, dtype=np.float32)
+            if article_embeddings
+            else np.empty((0, 0), dtype=np.float32)
+        )
+
+        return {
+            "unit": "article",
+            "ids": article_ids,
+            "embeddings": article_embeddings_np,
+            "metadatas": article_metadatas,
+            "documents": article_documents,
+            "chunk_counts": chunk_counts,
+        }
+
+    def fetch_articles_for_analysis(
+            self,
+            filter_criteria: Dict[str, Any],
+            time_range: Optional[Tuple[float, float]],
+            chunk_scan_limit: int,
+            time_field: str = "timestamp",
+            include_documents: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Public analysis fetch API.
+
+        Returns article-level records for downstream analysis.
+
+        Important:
+        - Chroma stores chunks internally.
+        - Repo exposes articles/documents externally.
+        - `chunk_scan_limit` currently means chunk scan limit, not final article limit.
+          This keeps compatibility with the old fetch_for_analysis behavior.
+        """
+        chunk_data = self._fetch_chunks_for_analysis(
+            filter_criteria=filter_criteria,
+            time_range=time_range,
+            limit=chunk_scan_limit,
+            time_field=time_field,
+            include_documents=include_documents,
+        )
+
+        if not chunk_data:
+            return {
+                "unit": "article",
+                "ids": [],
+                "embeddings": np.empty((0, 0), dtype=np.float32),
+                "metadatas": [],
+                "documents": [],
+                "chunk_counts": [],
+                "source_chunk_ids": [],
+            }
+
+        if chunk_data.get("error"):
+            return {
+                "unit": "article",
+                "ids": [],
+                "embeddings": np.empty((0, 0), dtype=np.float32),
+                "metadatas": [],
+                "documents": [],
+                "chunk_counts": [],
+                "source_chunk_ids": [],
+                "error": chunk_data.get("error"),
+            }
+
+        return self._aggregate_chunks_to_articles(
+            chunk_data=chunk_data,
+            time_field=time_field,
+        )
 
     def fetch_for_analysis(
             self,
@@ -1061,67 +1328,49 @@ class VectorCollectionRepo:
             time_field: str = "timestamp",
     ) -> Dict[str, Any]:
         """
-        Fetch raw records for analysis (embeddings + metadatas + documents + ids).
-        NOTE: Chroma where filter requires that operator dict has exactly ONE operator.
-              For a range query (gte & lte), must use $and with two separate clauses.
+        Public analysis API.
+
+        Returns article-level records.
+
+        Chunks are an internal storage detail and should not leak to Pipeline.
         """
-        criteria = (filter_criteria or {}).copy()
-        where = None
-
-        # Build time range expression correctly for Chroma:
-        # { "$and": [ {"timestamp":{"$gte":start}}, {"timestamp":{"$lte":end}}, ... ] }
-        if time_range:
-            start, end = time_range
-
-            time_and = [
-                {time_field: {"$gte": float(start)}},
-                {time_field: {"$lte": float(end)}},
-            ]
-
-            if not criteria:
-                where = {"$and": time_and}
-            else:
-                # If criteria already uses $and/$or, wrap it safely
-                # Chroma expects where to have exactly one top-level operator OR field map
-                # so we combine everything under $and.
-                where = {"$and": time_and + [criteria]}
-
-        else:
-            # no time range
-            where = criteria if criteria else None
-
-        try:
-            results = self._collection.get(
-                where=where,
-                limit=limit,
-                include=["embeddings", "metadatas", "documents"]
-            )
-            return results
-        except Exception as e:
-            logger.error(f"DB Fetch failed: {e}")
-            return {"error": str(e)}
+        return self.fetch_articles_for_analysis(
+            filter_criteria=filter_criteria,
+            time_range=time_range,
+            chunk_scan_limit=limit,
+            time_field=time_field,
+            include_documents=True,
+        )
 
     def run_analysis(self, config: AnalysisConfig) -> Dict[str, Any]:
-        """
-        Entry point for running an analysis session.
-        Creates a disposable pipeline, executes it, and returns the result.
-        """
-        analysis_output_dir = os.path.dirname(self._db_path)
-        
-        # Create pipeline instance (Connecting Repo <-> Pipeline)
-        pipeline = IntelligenceAnalysisPipeline(repo_interface=self, config=config)
-
-        # Execute
-        try:
-            result = pipeline.execute()
+        with memory_scope(
+                f"run_analysis:{self._collection_name}",
+                aggressive_cleanup=True
+        ):
+            pipeline = None
             try:
-                self._save_analysis_report(result)
-            except Exception as e:
-                logger.error(f"Failed to save analysis report text: {e}")
-            return result
-        finally:
-            # Explicit cleanup if necessary, though Python GC handles it
-            del pipeline
+                pipeline = IntelligenceAnalysisPipeline(repo_interface=self, config=config)
+                result = pipeline.execute()
+
+                try:
+                    self._save_analysis_report(result)
+                except Exception as e:
+                    logger.error(f"Failed to save analysis report text: {e}")
+
+                return result
+
+            finally:
+                if pipeline is not None:
+                    try:
+                        pipeline.close()
+                    except Exception:
+                        pass
+                    del pipeline
+
+                cleanup_memory(
+                    tag=f"run_analysis finally:{self._collection_name}",
+                    aggressive=True
+                )
 
     def _save_analysis_report(self, result: Dict[str, Any]):
         """

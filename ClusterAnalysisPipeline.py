@@ -141,6 +141,14 @@ class IntelligenceAnalysisPipeline:
         self.cfg = config
         self._timings = {}
 
+    def close(self):
+        """
+        主动断开可能的大对象引用。
+        """
+        self.repo = None
+        self.cfg = None
+        self._timings = None
+
     def execute(self) -> Dict[str, Any]:
         t_start = time.time()
 
@@ -179,31 +187,47 @@ class IntelligenceAnalysisPipeline:
 
     def _prepare_features(self, raw_data):
         t0 = time.time()
-        embeddings = raw_data['embeddings']
-        # Handle ChromaDB batch format if necessary
-        if isinstance(embeddings, list) and len(embeddings) > 0 and isinstance(embeddings[0], list):
-            embeddings = embeddings[0]
 
-        X = np.array(embeddings)
+        embeddings = raw_data["embeddings"]
+        X = np.asarray(embeddings, dtype=np.float32)
+
+        if X.ndim == 3 and X.shape[0] == 1:
+            X = X[0]
+
+        if X.ndim != 2:
+            raise ValueError(f"Invalid embeddings shape: {X.shape}")
 
         if self.cfg.time_weight > 0:
-            metas = raw_data['metadatas']
-            if isinstance(metas, list) and len(metas) > 0 and isinstance(metas[0], list):
-                metas = metas[0]
+            metas = raw_data.get("metadatas") or []
 
-            times = np.array([m.get('timestamp', 0) for m in metas]).reshape(-1, 1)
-            # MinMax Scale
-            if times.max() > times.min():
+            times = np.asarray(
+                [m.get("timestamp", 0) for m in metas],
+                dtype=np.float32
+            ).reshape(-1, 1)
+
+            if len(times) > 0 and times.max() > times.min():
                 times = (times - times.min()) / (times.max() - times.min())
-            X = np.hstack([X, times * self.cfg.time_weight])
 
-        self._timings['prep'] = time.time() - t0
+            X = np.hstack([
+                X,
+                times * np.float32(self.cfg.time_weight)
+            ])
+
+        self._timings["prep"] = time.time() - t0
         return X
 
     def _run_reduction(self, features):
         t0 = time.time()
         reducer = AlgoFactory.get_reducer(self.cfg.reduce_method)
         coords = reducer.reduce(features, **self.cfg.reduce_params)
+
+        coords = np.asarray(coords, dtype=np.float32)
+        if coords.ndim == 1:
+            coords = coords.reshape(-1, 1)
+
+        if coords.shape[1] == 1:
+            coords = np.hstack([coords, np.zeros((coords.shape[0], 1), dtype=np.float32)])
+
         self._timings['reduction'] = time.time() - t0
         return coords
 
@@ -216,9 +240,13 @@ class IntelligenceAnalysisPipeline:
 
     def _assemble_result(self, raw_data, coords, labels, n_clusters):
         t0 = time.time()
-        ids = raw_data['ids'][0] if isinstance(raw_data['ids'][0], list) else raw_data['ids']
-        docs = raw_data['documents'][0] if isinstance(raw_data['documents'][0], list) else raw_data['documents']
-        metas = raw_data['metadatas'][0] if isinstance(raw_data['metadatas'][0], list) else raw_data['metadatas']
+
+        if raw_data.get("unit") != "article":
+            raise ValueError(f"Pipeline expects article-level data, got: {raw_data.get('unit')}")
+
+        ids = raw_data["ids"]
+        docs = raw_data["documents"]
+        metas = raw_data["metadatas"]
 
         points = []
         # Groups for summary
