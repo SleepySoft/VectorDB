@@ -449,9 +449,9 @@ class VectorStorageEngine:
         Creates a hot backup of the database.
 
         Mechanism:
-        1. Acquire global lock (blocks new writes).
-        2. Create a zip archive of the database directory.
-        3. Release lock.
+        1. Acquire global lock and copy DB to temp dir (fast, seconds).
+        2. Release lock immediately to unblock reads/writes.
+        3. Create zip archive from temp dir (slow, minutes if large).
 
         Args:
             backup_dir (str): Directory to store the zip file.
@@ -466,39 +466,61 @@ class VectorStorageEngine:
         filename = f"vectordb_backup_{timestamp}"
         archive_path = os.path.join(backup_dir, filename)
 
-        # CRITICAL: Hold the lock to prevent modification during copy
+        # CRITICAL: Hold the lock ONLY for copying DB to temp (fast),
+        # NOT for the entire zip compression (slow).
+        temp_copy_dir = tempfile.mkdtemp(prefix="vectordb_backup_")
         with self._lock:
             logger.info(f"Starting backup... Locking DB at {self._db_path}")
             try:
-                # shutil.make_archive creates a zip file.
-                # Note: This reads files. If Chroma holds exclusive locks (Windows),
-                # this might fail. Usually SQLite allows read-sharing.
-                zip_file = shutil.make_archive(
-                    base_name=archive_path,
-                    format='zip',
-                    root_dir=self._db_path
-                )
-                logger.info(f"Backup created at: {zip_file}")
-                return zip_file
+                shutil.copytree(self._db_path, os.path.join(temp_copy_dir, "db"))
+                logger.info(f"DB copied to temp dir: {temp_copy_dir}")
             except Exception as e:
-                logger.error(f"Backup failed: {e}")
+                logger.error(f"Backup copy failed: {e}")
+                shutil.rmtree(temp_copy_dir, ignore_errors=True)
                 raise e
             finally:
-                logger.info("Backup finished. Unlocking DB.")
+                logger.info("Backup copy finished. Unlocking DB.")
+
+        # Compress outside the lock so reads/writes are not blocked
+        try:
+            zip_file = shutil.make_archive(
+                base_name=archive_path,
+                format='zip',
+                root_dir=temp_copy_dir
+            )
+            logger.info(f"Backup created at: {zip_file}")
+            return zip_file
+        except Exception as e:
+            logger.error(f"Backup compression failed: {e}")
+            raise e
+        finally:
+            shutil.rmtree(temp_copy_dir, ignore_errors=True)
 
     def restore_backup(self, zip_file_path: str):
         """
         Restores the database from a zip file and performs a HOT RELOAD.
 
         Mechanism:
-        1. Acquire lock.
-        2. Dereference and unload the Chroma Client (attempt to release file handles).
-        3. Wipe the current DB directory.
-        4. Unzip the backup into the DB directory.
-        5. Re-initialize the Chroma Client.
+        1. Unpack archive to temp dir outside the lock (slow).
+        2. Acquire lock, swap DB files, and reload Client (fast).
         """
         if not os.path.exists(zip_file_path):
             raise FileNotFoundError("Backup file not found")
+
+        # Unpack outside the lock to minimize service downtime
+        temp_dir = tempfile.mkdtemp(prefix="vectordb_restore_")
+        try:
+            shutil.unpack_archive(zip_file_path, temp_dir)
+            logger.info(f"Archive unpacked to temp dir: {temp_dir}")
+            # Find the actual db content inside temp_dir
+            items = os.listdir(temp_dir)
+            if len(items) == 1 and os.path.isdir(os.path.join(temp_dir, items[0])):
+                unpacked_db_path = os.path.join(temp_dir, items[0])
+            else:
+                unpacked_db_path = temp_dir
+        except Exception as e:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise e
 
         with self._lock:
             logger.info("Starting Restore... Service locked.")
@@ -517,16 +539,19 @@ class VectorStorageEngine:
                 logger.info("Client unloaded. Replacing files...")
 
                 # 2. Wipe current directory
-                # Warning: If this fails (e.g., file locked by OS), we are in trouble.
-                # In production, you might rename current to .bak before deleting.
                 if os.path.exists(self._db_path):
                     shutil.rmtree(self._db_path)
-
                 os.makedirs(self._db_path, exist_ok=True)
 
-                # 3. Unzip
-                shutil.unpack_archive(zip_file_path, self._db_path)
-                logger.info("Files unpacked.")
+                # 3. Copy from temp to actual db path (fast, within lock)
+                for item in os.listdir(unpacked_db_path):
+                    s = os.path.join(unpacked_db_path, item)
+                    d = os.path.join(self._db_path, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d)
+                    else:
+                        shutil.copy2(s, d)
+                logger.info("Files replaced. Re-initializing client...")
 
                 # 4. Reload Client
                 import chromadb
@@ -545,6 +570,8 @@ class VectorStorageEngine:
                 self._error_message = f"Restore failed: {e}"
                 logger.error(f"FATAL: Restore failed: {e}")
                 raise e
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class VectorCollectionRepo:

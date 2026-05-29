@@ -1,6 +1,7 @@
 # VectorDBService.py
 
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -81,6 +82,7 @@ class VectorDBService:
         self._frontend_path = os.path.join(self._base_dir, self.frontend_filename)
 
         self._analysis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AnalysisWorker")
+        self._analysis_semaphore = threading.Semaphore(2)  # 限制同时执行的 CPU 密集型分析任务数，避免服务无响应
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
         self._aggregation_jobs: Dict[str, Dict[str, Any]] = {}
 
@@ -582,7 +584,7 @@ class VectorDBService:
             config_payload = {
                 "filter_criteria": data.get("filter_criteria", {}),
                 "time_range": time_range,
-                "limit": int(data.get("limit", 20000)),
+                "limit": min(int(data.get("limit", 20000)), 50000),  # 硬上限 50000，防止单次请求加载过多数据导致 OOM/无响应
                 "reduce_method": data.get("reduce_method", "pca"),
                 "cluster_method": data.get("cluster_method", "birch"),
                 "reduce_params": data.get("reduce_params", {}),
@@ -896,27 +898,30 @@ class VectorDBService:
         Background Worker:
         1. Instantiates AnalysisConfig.
         2. Calls repo.run_analysis(config).
+
+        NOTE: 使用 Semaphore 限制同时执行的 CPU 密集型分析任务数，
+        避免过多分析任务耗尽 CPU/内存导致服务无响应。
         """
         try:
-            self._analysis_jobs[job_id]["status"] = "processing"
+            with self._analysis_semaphore:
+                self._analysis_jobs[job_id]["status"] = "processing"
 
-            repo = self.engine.get_repository(collection_name)
-            if not repo:
-                raise ValueError(f"Collection {collection_name} disappeared")
+                repo = self.engine.get_repository(collection_name)
+                if not repo:
+                    raise ValueError(f"Collection {collection_name} disappeared")
 
-            # 实例化配置对象
-            # 使用 **config_payload 解包字典，直接对应 AnalysisConfig 的字段
-            config = AnalysisConfig(**config_payload)
+                # 实例化配置对象
+                config = AnalysisConfig(**config_payload)
 
-            # [CRITICAL] 调用统一的新接口
-            result = repo.run_analysis(config)
+                # [CRITICAL] 调用统一的新接口
+                result = repo.run_analysis(config)
 
-            if "error" in result:
-                self._analysis_jobs[job_id]["status"] = "failed"
-                self._analysis_jobs[job_id]["error"] = result["error"]
-            else:
-                self._analysis_jobs[job_id]["status"] = "completed"
-                self._analysis_jobs[job_id]["result"] = result
+                if "error" in result:
+                    self._analysis_jobs[job_id]["status"] = "failed"
+                    self._analysis_jobs[job_id]["error"] = result["error"]
+                else:
+                    self._analysis_jobs[job_id]["status"] = "completed"
+                    self._analysis_jobs[job_id]["result"] = result
 
         except Exception as e:
             logger.error(f"Pipeline job {job_id} failed: {e}", exc_info=True)
@@ -942,15 +947,20 @@ class VectorDBService:
         logger.info(f"VectorDB Service mounted at {url_prefix}")
         return True
 
-    def run_standalone(self, host="0.0.0.0", port=8001, debug=False):
-        """Run as a standalone Flask app."""
+    def run_standalone(self, host="0.0.0.0", port=8001, debug=False, threads=16):
+        """Run as a standalone production server using Waitress."""
         app = Flask(__name__)
 
         # Mount at root for standalone usage
         self.mount_to_app(app, url_prefix="")
 
-        print(f"Starting standalone VectorDB at http://{host}:{port}")
-        app.run(host=host, port=port, debug=debug)
+        print(f"Starting standalone VectorDB at http://{host}:{port} (threads={threads})")
+        try:
+            from waitress import serve
+            serve(app, host=host, port=port, threads=threads)
+        except ImportError:
+            logger.warning("Waitress not installed, falling back to Flask development server.")
+            app.run(host=host, port=port, debug=debug)
 
 
 # --- Usage Examples ---
@@ -989,6 +999,11 @@ def main():
                         default=os.getenv("VECTOR_AGG_STORE_DIR", "./aggregation_store"),
                         help="Directory to persist aggregation offline results (default: ./aggregation_store)")
 
+    # 5. Server Threads
+    parser.add_argument("--threads", type=int,
+                        default=int(os.getenv("VECTOR_THREADS", 16)),
+                        help="Number of worker threads for Waitress (default: 16 or env VECTOR_THREADS)")
+
     args = parser.parse_args()
 
     print("=" * 50)
@@ -997,6 +1012,7 @@ def main():
     print(f" - DB Path:   {args.db_path}")
     print(f" - Model:     {args.model}")
     print(f" - AggStore:  {args.agg_store_dir}")
+    print(f" - Threads:   {args.threads}")
     print("=" * 50)
 
     # --- Initialization ---
@@ -1057,7 +1073,7 @@ def main():
     service = VectorDBService(engine=engine_instance, cluster_mgr=cluster_mgr)
 
     # 6. Run Standalone
-    service.run_standalone(host=args.host, port=args.port, debug=False)
+    service.run_standalone(host=args.host, port=args.port, debug=False, threads=args.threads)
 
 
 if __name__ == "__main__":
