@@ -156,6 +156,10 @@
                         class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-file-circle-plus mr-2"></i> Add / Upsert
                     </button>
+                    <button @click="currentTab = 'memory'; fetchMemoryStatus()" :class="tabClass('memory')"
+                        class="pb-3 px-1 font-medium text-sm flex items-center">
+                        <i class="fa-solid fa-memory mr-2"></i> Memory
+                    </button>
                 </div>
                 <div class="pb-3 text-sm text-gray-400 italic" v-if="selectedCollection">
                     Active: <b>{{ selectedCollection }}</b>
@@ -164,7 +168,7 @@
 
             <div class="flex-1 overflow-hidden relative">
 
-                <div v-if="!selectedCollection" class="h-full flex flex-col items-center justify-center text-gray-400">
+                <div v-if="!selectedCollection && currentTab !== 'memory'" class="h-full flex flex-col items-center justify-center text-gray-400">
                     <i class="fa-solid fa-layer-group text-6xl mb-4 text-gray-300"></i>
                     <p class="text-lg">Select or create a collection to start.</p>
                 </div>
@@ -1084,6 +1088,120 @@
                         </div>
                     </div>
                 </div>
+
+                <div v-else-if="currentTab === 'memory'" class="h-full overflow-auto p-8 bg-gray-50">
+                    <div class="max-w-6xl mx-auto space-y-6">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h2 class="text-xl font-bold text-gray-800 flex items-center">
+                                    <i class="fa-solid fa-memory mr-3 text-teal-600"></i> Memory Status
+                                </h2>
+                            </div>
+                            <button @click="fetchMemoryStatus" :disabled="memoryLoading"
+                                class="px-4 py-2 bg-white border rounded hover:bg-gray-100 text-sm flex items-center disabled:opacity-50">
+                                <i class="fa-solid fa-rotate mr-2 text-gray-400" :class="memoryLoading ? 'fa-spin' : ''"></i>
+                                Refresh
+                            </button>
+                        </div>
+
+                        <div v-if="!memoryStats" class="bg-white border rounded-lg p-10 text-center text-gray-400">
+                            <i class="fa-solid fa-chart-simple text-4xl mb-3 text-gray-300"></i>
+                            <div>No memory status loaded.</div>
+                        </div>
+
+                        <div v-else class="space-y-6">
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div class="bg-white border rounded-lg p-5">
+                                    <div class="text-xs font-bold uppercase text-gray-400 mb-2">RSS</div>
+                                    <div class="text-2xl font-mono font-bold text-teal-700">
+                                        {{ memoryStats.process.rss_mb ?? 'n/a' }} MB
+                                    </div>
+                                    <div class="text-xs text-gray-400 mt-1">{{ memoryStats.process.source || 'unknown' }}</div>
+                                </div>
+                                <div class="bg-white border rounded-lg p-5">
+                                    <div class="text-xs font-bold uppercase text-gray-400 mb-2">VMS / Private</div>
+                                    <div class="text-2xl font-mono font-bold text-slate-700">
+                                        {{ memoryStats.process.vms_mb ?? 'n/a' }} MB
+                                    </div>
+                                    <div class="text-xs text-gray-400 mt-1">pid {{ memoryStats.process.pid }}</div>
+                                </div>
+                                <div class="bg-white border rounded-lg p-5">
+                                    <div class="text-xs font-bold uppercase text-gray-400 mb-2">Queue</div>
+                                    <div class="text-2xl font-mono font-bold"
+                                        :class="(memoryStats.engine.queue?.qsize || 0) > 0 ? 'text-orange-600' : 'text-slate-700'">
+                                        {{ memoryStats.engine.queue?.qsize ?? 0 }}
+                                    </div>
+                                    <div class="text-xs text-gray-400 mt-1">{{ memoryStats.engine.queue?.status || 'unknown' }}</div>
+                                </div>
+                                <div class="bg-white border rounded-lg p-5">
+                                    <div class="text-xs font-bold uppercase text-gray-400 mb-2">Uptime</div>
+                                    <div class="text-2xl font-mono font-bold text-slate-700">
+                                        {{ formatDuration(memoryStats.service.uptime_sec) }}
+                                    </div>
+                                    <div class="text-xs text-gray-400 mt-1">GC {{ memoryStats.python.gc_counts.join(' / ') }}</div>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                                <div class="bg-white border rounded-lg p-5 space-y-3">
+                                    <h3 class="font-bold text-gray-700">Async Jobs</h3>
+                                    <div class="grid grid-cols-2 gap-2 text-sm">
+                                        <div class="text-gray-500">Total</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.async.total }}</div>
+                                        <div class="text-gray-500">Retained Results</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.async.retained_results }}</div>
+                                        <div class="text-gray-500">TTL</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.async.ttl_sec }}s</div>
+                                    </div>
+                                    <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto">{{ JSON.stringify(memoryStats.jobs.async.by_status, null, 2) }}</pre>
+                                </div>
+
+                                <div class="bg-white border rounded-lg p-5 space-y-3">
+                                    <h3 class="font-bold text-gray-700">Analysis Jobs</h3>
+                                    <div class="grid grid-cols-2 gap-2 text-sm">
+                                        <div class="text-gray-500">Total</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.analysis.total }}</div>
+                                        <div class="text-gray-500">Retained Results</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.analysis.retained_results }}</div>
+                                        <div class="text-gray-500">Result TTL</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.analysis.result_ttl_sec }}s</div>
+                                    </div>
+                                    <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto">{{ JSON.stringify(memoryStats.jobs.analysis.by_status, null, 2) }}</pre>
+                                </div>
+
+                                <div class="bg-white border rounded-lg p-5 space-y-3">
+                                    <h3 class="font-bold text-gray-700">Aggregation Jobs</h3>
+                                    <div class="grid grid-cols-2 gap-2 text-sm">
+                                        <div class="text-gray-500">Configured</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.aggregation.configured }}</div>
+                                        <div class="text-gray-500">Total</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.aggregation.total ?? 0 }}</div>
+                                        <div class="text-gray-500">Retained Results</div>
+                                        <div class="font-mono text-right">{{ memoryStats.jobs.aggregation.retained_results ?? 0 }}</div>
+                                    </div>
+                                    <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto">{{ JSON.stringify(memoryStats.jobs.aggregation.by_status || {}, null, 2) }}</pre>
+                                </div>
+                            </div>
+
+                            <div class="bg-white border rounded-lg p-5">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h3 class="font-bold text-gray-700">Aggregation Store</h3>
+                                    <span class="text-xs font-mono text-gray-400">{{ memoryStats.aggregation_store.store_type || 'n/a' }}</span>
+                                </div>
+                                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    <div>
+                                        <div class="text-xs font-bold uppercase text-gray-400 mb-2">Offline Latest In Memory</div>
+                                        <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto max-h-72">{{ JSON.stringify(memoryStats.aggregation_store.offline || {}, null, 2) }}</pre>
+                                    </div>
+                                    <div>
+                                        <div class="text-xs font-bold uppercase text-gray-400 mb-2">Online State In Memory</div>
+                                        <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto max-h-72">{{ JSON.stringify(memoryStats.aggregation_store.online || {}, null, 2) }}</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1177,6 +1295,8 @@
 
                 // Queue Monitoring
                 const queueStats = ref({ qsize: 0, status: 'stopped' });
+                const memoryStats = ref(null);
+                const memoryLoading = ref(false);
 
                 const exploreConfig = ref({
                     // Backend supports: pca, umap
@@ -2044,6 +2164,29 @@
                     } catch (e) { }
                 };
 
+                const fetchMemoryStatus = async () => {
+                    memoryLoading.value = true;
+                    try {
+                        const res = await fetch('api/status/memory');
+                        if (!res.ok) throw new Error('Failed to load memory status');
+                        memoryStats.value = await res.json();
+                    } catch (e) {
+                        showToast(e.message || 'Failed to load memory status', 'error');
+                    } finally {
+                        memoryLoading.value = false;
+                    }
+                };
+
+                const formatDuration = (seconds) => {
+                    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+                    const h = Math.floor(s / 3600);
+                    const m = Math.floor((s % 3600) / 60);
+                    const sec = s % 60;
+                    if (h > 0) return `${h}h ${m}m`;
+                    if (m > 0) return `${m}m ${sec}s`;
+                    return `${sec}s`;
+                };
+
                 const clearCollection = async () => {
                     if (!confirm("DANGER: Delete ALL data in this collection?")) return;
                     await fetch(`${getBaseUrl()}/clear`, { method: 'POST' });
@@ -2058,11 +2201,17 @@
                 onMounted(() => {
                     refreshCollections();
                     setInterval(fetchQueueStatus, 2000);
+                    setInterval(() => {
+                        if (currentTab.value === 'memory') fetchMemoryStatus();
+                    }, 5000);
                 });
 
                 watch(currentTab, (newVal) => {
                     if (newVal === 'explore' && analysisState.value.hasData) {
                         nextTick(() => renderChart());
+                    }
+                    if (newVal === 'memory') {
+                        fetchMemoryStatus();
                     }
                 });
 
@@ -2094,6 +2243,7 @@
                     browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
                     refreshCollections, createNewCollection, loadCollection, fetchDocuments, performSearch, doUpsert, deleteDoc,
                     clearCollection, downloadBackup, uploadRestore, tabClass, getScoreColor, queueStats,
+                    memoryStats, memoryLoading, fetchMemoryStatus, formatDuration,
 
                     aggRangeMode, aggPreset, aggPresetCustomSec,
                     aggManualStartLocal, aggManualEndLocal,

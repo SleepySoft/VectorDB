@@ -8,6 +8,7 @@ import logging
 import argparse
 import tempfile
 import threading
+import gc
 from enum import Enum
 from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -174,6 +175,31 @@ class AsyncJobManager:
                 removed += 1
         return removed
 
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            by_status: Dict[str, int] = {}
+            by_type: Dict[str, int] = {}
+            result_kinds: Dict[str, int] = {}
+            retained_results = 0
+            for job in self._jobs.values():
+                status = job.get("status") or "unknown"
+                job_type = job.get("type") or "unknown"
+                result_kind = job.get("result_kind") or "unknown"
+                by_status[status] = by_status.get(status, 0) + 1
+                by_type[job_type] = by_type.get(job_type, 0) + 1
+                result_kinds[result_kind] = result_kinds.get(result_kind, 0) + 1
+                if job.get("result") is not None:
+                    retained_results += 1
+            return {
+                "total": len(self._jobs),
+                "by_status": by_status,
+                "by_type": by_type,
+                "result_kinds": result_kinds,
+                "retained_results": retained_results,
+                "ttl_sec": self._ttl_sec,
+                "max_jobs": self._max_jobs,
+            }
+
 
 class VectorDBService:
     """
@@ -199,6 +225,7 @@ class VectorDBService:
         self.cluster_mgr = cluster_mgr
         self.frontend_filename = frontend_filename
         self._is_registered = False
+        self._started_at = time.time()
 
         # Locate the frontend file relative to this script
         self._base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -567,6 +594,11 @@ class VectorDBService:
         def queue_status():
             """New endpoint to monitor queue depth."""
             return jsonify(self.engine.get_queue_status())
+
+        @route("/api/status/memory", methods=["GET"])
+        def memory_status():
+            """Returns lightweight process and in-memory object retention metrics."""
+            return jsonify(self._get_memory_status())
 
         @route("/api/collections/<name>/stats", methods=["GET"])
         def get_stats(name):
@@ -1257,6 +1289,173 @@ class VectorDBService:
             self._analysis_jobs[job_id]["status"] = "failed"
             self._analysis_jobs[job_id]["error"] = str(e)
             self._analysis_jobs[job_id]["finished_at"] = time.time()
+
+    def _get_memory_status(self) -> Dict[str, Any]:
+        return {
+            "process": self._get_process_memory_status(),
+            "python": {
+                "gc_counts": list(gc.get_count()),
+            },
+            "service": {
+                "uptime_sec": round(time.time() - self._started_at, 3),
+                "metrics": dict(self.metrics),
+            },
+            "engine": {
+                "queue": self.engine.get_queue_status() if hasattr(self.engine, "get_queue_status") else None,
+                "status": self.engine.get_status() if hasattr(self.engine, "get_status") else None,
+            },
+            "jobs": {
+                "async": self._job_manager.get_stats(),
+                "analysis": self._get_analysis_job_stats(),
+                "aggregation": self._get_cluster_job_stats(),
+            },
+            "aggregation_store": self._get_aggregation_store_stats(),
+        }
+
+    def _get_process_memory_status(self) -> Dict[str, Any]:
+        pid = os.getpid()
+        out = {"pid": pid, "rss_bytes": None, "rss_mb": None, "vms_bytes": None, "vms_mb": None, "source": None}
+
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            info = proc.memory_info()
+            out.update({
+                "rss_bytes": int(info.rss),
+                "rss_mb": round(info.rss / 1024 / 1024, 2),
+                "vms_bytes": int(info.vms),
+                "vms_mb": round(info.vms / 1024 / 1024, 2),
+                "source": "psutil",
+            })
+            return out
+        except Exception:
+            pass
+
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                class ProcessMemoryCountersEx(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", ctypes.c_ulong),
+                        ("PageFaultCount", ctypes.c_ulong),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                        ("PrivateUsage", ctypes.c_size_t),
+                    ]
+
+                counters = ProcessMemoryCountersEx()
+                counters.cb = ctypes.sizeof(ProcessMemoryCountersEx)
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+                    handle,
+                    ctypes.byref(counters),
+                    counters.cb
+                )
+                if ok:
+                    out.update({
+                        "rss_bytes": int(counters.WorkingSetSize),
+                        "rss_mb": round(counters.WorkingSetSize / 1024 / 1024, 2),
+                        "vms_bytes": int(counters.PrivateUsage),
+                        "vms_mb": round(counters.PrivateUsage / 1024 / 1024, 2),
+                        "source": "windows_psapi",
+                    })
+            except Exception:
+                pass
+
+        return out
+
+    def _get_analysis_job_stats(self) -> Dict[str, Any]:
+        by_status: Dict[str, int] = {}
+        retained_results = 0
+        for job in self._analysis_jobs.values():
+            status = job.get("status") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+            if job.get("result") is not None:
+                retained_results += 1
+        return {
+            "total": len(self._analysis_jobs),
+            "by_status": by_status,
+            "retained_results": retained_results,
+            "result_ttl_sec": self._analysis_result_ttl_sec,
+        }
+
+    def _get_cluster_job_stats(self) -> Dict[str, Any]:
+        if not self.cluster_mgr:
+            return {"configured": False}
+
+        jobs = getattr(self.cluster_mgr, "_jobs", {}) or {}
+        by_status: Dict[str, int] = {}
+        retained_results = 0
+        for job in jobs.values():
+            status = job.get("status") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+            if job.get("result") is not None:
+                retained_results += 1
+        return {
+            "configured": True,
+            "total": len(jobs),
+            "by_status": by_status,
+            "retained_results": retained_results,
+        }
+
+    def _get_aggregation_store_stats(self) -> Dict[str, Any]:
+        if not self.cluster_mgr or not hasattr(self.cluster_mgr, "store") or self.cluster_mgr.store is None:
+            return {"configured": False}
+
+        store = self.cluster_mgr.store
+        lock = getattr(store, "_lock", None)
+
+        def collect() -> Dict[str, Any]:
+            offline_versions = getattr(store, "_offline_versions", {}) or {}
+            online_state = getattr(store, "_online_state", {}) or {}
+
+            offline = {}
+            for plan_id, versions in offline_versions.items():
+                latest = versions[-1] if versions else {}
+                clusters = latest.get("clusters") or {}
+                noise = latest.get("noise") or {}
+                doc_to_cluster = latest.get("doc_to_cluster") or {}
+                offline[plan_id] = {
+                    "versions_in_memory": len(versions),
+                    "n_points": latest.get("n_points"),
+                    "n_clusters": latest.get("n_clusters"),
+                    "clusters_count": len(clusters),
+                    "cluster_members_count": sum(len((c or {}).get("members") or []) for c in clusters.values()),
+                    "noise_members_count": len(noise.get("members") or []),
+                    "doc_to_cluster_count": len(doc_to_cluster),
+                    "version": latest.get("version"),
+                }
+
+            online = {}
+            for plan_id, state in online_state.items():
+                clusters = state.get("clusters") or {}
+                doc_to_cluster = state.get("doc_to_cluster") or {}
+                online[plan_id] = {
+                    "clusters_count": len(clusters),
+                    "cluster_members_count": sum(len((c or {}).get("members") or []) for c in clusters.values()),
+                    "doc_to_cluster_count": len(doc_to_cluster),
+                    "base_version": state.get("base_version"),
+                    "updated_at": state.get("updated_at"),
+                }
+
+            return {
+                "configured": True,
+                "store_type": type(store).__name__,
+                "offline": offline,
+                "online": online,
+            }
+
+        if lock:
+            with lock:
+                return collect()
+        return collect()
 
     def mount_to_app(self, app: Flask, url_prefix: str = "/vector-db", wrapper: Optional[Callable] = None) -> bool:
         """
