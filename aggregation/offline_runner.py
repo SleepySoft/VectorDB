@@ -141,6 +141,7 @@ class OfflineClusterRunner(OfflineRunner):
         params = overrides.get("params", plan.params or {})
 
         labels = self._cluster(Xn, method=method, params=params)
+        coords = self._reduce_for_visualization(Xn, params=params)
 
         # Build result dict
         version = time.strftime("%Y%m%d_%H%M%S")
@@ -154,6 +155,7 @@ class OfflineClusterRunner(OfflineRunner):
             last_seen_list=last_seen_list,
             Xn=Xn,
             labels=labels,
+            coords=coords,
             version=version,
             overrides=overrides,
         )
@@ -211,6 +213,11 @@ class OfflineClusterRunner(OfflineRunner):
            - linkage (str, default="average"): Which distance to use between sets of observation.
              "average" or "complete" works well for semantic grouping to avoid chaining.
            - metric (str, default="cosine"): Distance metric.
+
+        4. K-Means ("kmeans"):
+           Fixed-count clustering for workflows that need exactly K groups.
+           - n_clusters (int, default=10): Target number of clusters.
+           - batch_size (int, default=1024): MiniBatchKMeans batch size.
         """
         method = (method or "").lower().strip()
 
@@ -265,7 +272,61 @@ class OfflineClusterRunner(OfflineRunner):
                 )
             return model.fit_predict(X)
 
+        if method == "kmeans":
+            from sklearn.cluster import MiniBatchKMeans
+            n_clusters = int(params.get("n_clusters", 10))
+            n_clusters = max(1, min(n_clusters, int(X.shape[0])))
+            batch_size = int(params.get("batch_size", 1024))
+            model = MiniBatchKMeans(n_clusters=n_clusters, batch_size=batch_size, n_init="auto")
+            return model.fit_predict(X)
+
         raise ValueError(f"Unsupported clustering method: {method}")
+
+    def _reduce_for_visualization(self, X: np.ndarray, params: Dict[str, Any]) -> np.ndarray:
+        """
+        Return 2D coordinates for UI visualization. Defaults to PCA because it is
+        deterministic and already available with scikit-learn.
+        """
+        if X.size == 0:
+            return np.empty((0, 2), dtype=np.float32)
+
+        method = str(params.get("reduce_method", "pca") or "pca").lower().strip()
+        reduce_params = params.get("reduce_params") or {}
+
+        if X.shape[0] == 1:
+            return np.array([[0.0, 0.0]], dtype=np.float32)
+
+        try:
+            if method == "umap":
+                import umap
+                n_neighbors = int(reduce_params.get("n_neighbors", 15))
+                min_dist = float(reduce_params.get("min_dist", 0.1))
+                reducer = umap.UMAP(
+                    n_components=2,
+                    n_neighbors=max(2, min(n_neighbors, X.shape[0] - 1)),
+                    min_dist=min_dist,
+                    metric=reduce_params.get("metric", "cosine"),
+                    random_state=int(reduce_params.get("random_state", 42))
+                )
+                return reducer.fit_transform(X).astype(np.float32)
+
+            if method == "none":
+                coords = X[:, :2]
+                if coords.shape[1] == 1:
+                    coords = np.hstack([coords, np.zeros((coords.shape[0], 1), dtype=coords.dtype)])
+                return coords.astype(np.float32)
+
+            from sklearn.decomposition import PCA
+            n_components = min(2, X.shape[0], X.shape[1])
+            coords = PCA(n_components=n_components).fit_transform(X)
+            if coords.shape[1] == 1:
+                coords = np.hstack([coords, np.zeros((coords.shape[0], 1), dtype=coords.dtype)])
+            return coords.astype(np.float32)
+        except Exception:
+            coords = X[:, :2]
+            if coords.shape[1] == 1:
+                coords = np.hstack([coords, np.zeros((coords.shape[0], 1), dtype=coords.dtype)])
+            return coords.astype(np.float32)
 
     def _empty_result(self, plan: AggregationPlan, time_range, overrides) -> Dict[str, Any]:
         return {
@@ -282,6 +343,7 @@ class OfflineClusterRunner(OfflineRunner):
             "clusters": {},
             "noise": {"size": 0, "members": []},
             "doc_to_cluster": {},
+            "points": [],
         }
 
     def _build_result(
@@ -295,17 +357,30 @@ class OfflineClusterRunner(OfflineRunner):
         last_seen_list: List[Optional[float]],
         Xn: np.ndarray,
         labels: np.ndarray,
+        coords: np.ndarray,
         version: str,
         overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
         # cluster aggregation
         clusters: Dict[str, Dict[str, Any]] = {}
         doc_to_cluster: Dict[str, str] = {}
+        points: List[Dict[str, Any]] = []
 
         # group indices by label
         label_to_idx: Dict[int, List[int]] = {}
         for i, lb in enumerate(labels.tolist()):
-            label_to_idx.setdefault(int(lb), []).append(i)
+            label = int(lb)
+            label_to_idx.setdefault(label, []).append(i)
+            cluster_id = "noise" if label == -1 else f"cluster_{label}"
+            points.append({
+                "doc_id": doc_ids[i],
+                "cluster": cluster_id,
+                "label": label,
+                "x": round(float(coords[i][0]), 6),
+                "y": round(float(coords[i][1]), 6),
+                "preview": previews[i],
+                "last_seen": last_seen_list[i],
+            })
 
         for lb, idxs in label_to_idx.items():
             if lb == -1:
@@ -358,4 +433,5 @@ class OfflineClusterRunner(OfflineRunner):
             "clusters": clusters,
             "noise": {"size": n_noise, "members": noise_members},
             "doc_to_cluster": doc_to_cluster,
+            "points": points,
         }

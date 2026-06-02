@@ -25,7 +25,7 @@ class AggregationPlan:
     max_points: int = 50000                  # hard cap for clustering input points (after preprocessing)
 
     # Offline clustering method
-    method: str = "hdbscan"                  # "hdbscan" | "dbscan" | "agglomerative_threshold"
+    method: str = "hdbscan"                  # "hdbscan" | "dbscan" | "agglomerative_threshold" | "kmeans"
     params: Dict[str, Any] = field(default_factory=dict)
 
     # Feature configuration
@@ -59,5 +59,5 @@ class AggregationPlan:
             raise ValueError("limit must be positive")
         if self.max_points <= 0:
             raise ValueError("max_points must be positive")
-        if self.method not in ("hdbscan", "dbscan", "agglomerative_threshold"):
+        if self.method not in ("hdbscan", "dbscan", "agglomerative_threshold", "kmeans"):
             raise ValueError(f"Unsupported method: {self.method}")

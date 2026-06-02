@@ -144,10 +144,6 @@
                         class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-magnifying-glass mr-2"></i> Search
                     </button>
-                    <button @click="currentTab = 'explore'" :class="tabClass('explore')"
-                        class="pb-3 px-1 font-medium text-sm flex items-center">
-                        <i class="fa-solid fa-map-location-dot mr-2"></i> Explore / Clusters
-                    </button>
                     <button @click="currentTab = 'aggregation'; initAggregationTab()" :class="tabClass('aggregation')"
                         class="pb-3 px-1 font-medium text-sm flex items-center">
                         <i class="fa-solid fa-layer-group mr-2"></i> Aggregation
@@ -702,6 +698,10 @@
                                                 :class="aggViewTab==='offline' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
                                                 Offline
                                             </button>
+                                            <button @click="showAggregationVisual()" class="pb-2 text-sm font-medium"
+                                                :class="aggViewTab==='visual' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
+                                                Visualization
+                                            </button>
                                             <button @click="aggViewTab='online'" class="pb-2 text-sm font-medium"
                                                 :class="aggViewTab==='online' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
                                                 Online
@@ -858,8 +858,45 @@
                                                 </div>
                                             </div>
 
+                                            <!-- VISUALIZATION -->
+                                            <div v-else-if="aggViewTab==='visual'" class="h-full min-h-[560px] flex gap-4">
+                                                <div class="flex-1 min-w-0 bg-slate-50 border rounded-lg overflow-hidden relative">
+                                                    <div ref="aggChartContainer" class="w-full h-full min-h-[560px]"></div>
+                                                    <div v-if="!offlineLatest || !(offlineLatest.points || []).length"
+                                                        class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 bg-slate-50">
+                                                        <i class="fa-solid fa-chart-simple text-4xl mb-3 text-gray-300"></i>
+                                                        <p>No visualization points. Run offline aggregation first.</p>
+                                                    </div>
+                                                </div>
+
+                                                <div class="w-80 bg-white border rounded-lg overflow-hidden flex flex-col">
+                                                    <div class="p-3 border-b bg-gray-50 flex items-center justify-between">
+                                                        <div class="font-bold text-gray-700 text-sm">Groups</div>
+                                                        <button @click="resetAggregationVisualFocus"
+                                                            class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                            Show All
+                                                        </button>
+                                                    </div>
+                                                    <div class="flex-1 overflow-y-auto scroller divide-y">
+                                                        <div v-for="c in offlineClustersList" :key="c.cluster_id"
+                                                            class="p-3 hover:bg-gray-50 cursor-pointer"
+                                                            :class="aggActiveCluster===c.cluster_id ? 'bg-indigo-50' : ''"
+                                                            @click="focusAggregationCluster(c.cluster_id)">
+                                                            <div class="flex items-center justify-between">
+                                                                <span class="font-mono text-xs font-bold"
+                                                                    :style="{ color: getClusterColor(c.cluster_id) }">{{ c.cluster_id }}</span>
+                                                                <span class="text-xs bg-gray-100 border rounded px-2 py-0.5 text-gray-600">
+                                                                    {{ c.size }} docs
+                                                                </span>
+                                                            </div>
+                                                            <div class="text-xs text-gray-500 mt-1 line-clamp-2">{{ c.repr_preview }}</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
                                             <!-- ONLINE -->
-                                            <div v-else class="h-full overflow-y-auto scroller pr-2">
+                                            <div v-else-if="aggViewTab==='online'" class="h-full overflow-y-auto scroller pr-2">
                                                 <!-- 把你原来的 Online State 卡片内容粘贴到这里 -->
                                                 <!-- 如果你之前 Online State 是一整块，就直接复制过来即可 -->
                                                 <div class="bg-white border rounded-lg shadow-sm">
@@ -982,6 +1019,7 @@
                                     <select v-model="planForm.method"
                                         class="w-full p-2 border rounded text-xs bg-white">
                                         <option value="hdbscan">hdbscan</option>
+                                        <option value="kmeans">kmeans</option>
                                         <option value="dbscan">dbscan</option>
                                         <option value="agglomerative_threshold">agglomerative_threshold</option>
                                     </select>
@@ -1017,10 +1055,108 @@
                                 </div>
                             </div>
 
-                            <div>
-                                <label class="block text-xs font-bold text-gray-500 mb-1">params (JSON)</label>
-                                <textarea v-model="planForm.params_json" rows="4"
-                                    class="w-full p-2 border rounded json-input bg-gray-50"></textarea>
+                            <div class="space-y-3 border rounded p-3 bg-gray-50">
+                                <div class="text-xs font-bold text-gray-500 uppercase">Method Parameters</div>
+
+                                <div v-if="planForm.method === 'kmeans'" class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-6">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">n_clusters</label>
+                                        <input v-model.number="planForm.params.n_clusters" type="number" min="1"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-6">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">batch_size</label>
+                                        <input v-model.number="planForm.params.batch_size" type="number" min="16"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                </div>
+
+                                <div v-else-if="planForm.method === 'hdbscan'" class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">min_cluster_size</label>
+                                        <input v-model.number="planForm.params.min_cluster_size" type="number" min="2"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">min_samples</label>
+                                        <input v-model.number="planForm.params.min_samples" type="number" min="1"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">selection</label>
+                                        <select v-model="planForm.params.cluster_selection_method"
+                                            class="w-full p-2 border rounded text-xs bg-white">
+                                            <option value="eom">eom</option>
+                                            <option value="leaf">leaf</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-span-3">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">epsilon</label>
+                                        <input v-model.number="planForm.params.cluster_selection_epsilon" type="number" step="0.01" min="0"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                </div>
+
+                                <div v-else-if="planForm.method === 'dbscan'" class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">eps</label>
+                                        <input v-model.number="planForm.params.eps" type="number" step="0.01" min="0.01"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">min_samples</label>
+                                        <input v-model.number="planForm.params.min_samples" type="number" min="1"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">metric</label>
+                                        <input v-model="planForm.params.metric"
+                                            class="w-full p-2 border rounded text-xs bg-white font-mono" />
+                                    </div>
+                                </div>
+
+                                <div v-else class="grid grid-cols-12 gap-3">
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">distance_threshold</label>
+                                        <input v-model.number="planForm.params.distance_threshold" type="number" step="0.01" min="0.01"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">linkage</label>
+                                        <select v-model="planForm.params.linkage"
+                                            class="w-full p-2 border rounded text-xs bg-white">
+                                            <option value="average">average</option>
+                                            <option value="complete">complete</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">metric</label>
+                                        <input v-model="planForm.params.metric"
+                                            class="w-full p-2 border rounded text-xs bg-white font-mono" />
+                                    </div>
+                                </div>
+
+                                <div class="border-t pt-3 grid grid-cols-12 gap-3">
+                                    <div class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">visual reduce</label>
+                                        <select v-model="planForm.params.reduce_method"
+                                            class="w-full p-2 border rounded text-xs bg-white">
+                                            <option value="pca">pca</option>
+                                            <option value="umap">umap</option>
+                                            <option value="none">none</option>
+                                        </select>
+                                    </div>
+                                    <div v-if="planForm.params.reduce_method === 'umap'" class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">n_neighbors</label>
+                                        <input v-model.number="planForm.params.reduce_params.n_neighbors" type="number" min="2"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                    <div v-if="planForm.params.reduce_method === 'umap'" class="col-span-4">
+                                        <label class="block text-xs font-bold text-gray-500 mb-1">min_dist</label>
+                                        <input v-model.number="planForm.params.reduce_params.min_dist" type="number" step="0.01" min="0"
+                                            class="w-full p-2 border rounded text-xs text-center bg-white" />
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="flex items-center justify-between">
@@ -1401,6 +1537,9 @@
 
                 const offlineClusterFilter = ref('');
                 const selectedOfflineClusterId = ref('');
+                const aggActiveCluster = ref(null);
+                const aggChartContainer = ref(null);
+                let aggChartInstance = null;
 
                 const onlineClusterFilter = ref('');
                 const offlineClusterItems = ref([]);
@@ -1416,10 +1555,61 @@
                     max_points: 50000,
                     enable_online: true,
                     persist: true,
-                    params_json: JSON.stringify({ min_cluster_size: 3, min_samples: 2 }, null, 2),
+                    params: {},
                     time_field: 'timestamp',
                     custom_time_field: '',
                 });
+
+                const defaultPlanParams = (method) => {
+                    const common = { reduce_method: 'pca', reduce_params: { n_neighbors: 15, min_dist: 0.1 } };
+                    if (method === 'kmeans') return { n_clusters: 12, batch_size: 1024, ...common };
+                    if (method === 'dbscan') return { eps: 0.25, min_samples: 3, metric: 'cosine', ...common };
+                    if (method === 'agglomerative_threshold') {
+                        return { distance_threshold: 0.25, linkage: 'average', metric: 'cosine', ...common };
+                    }
+                    return { min_cluster_size: 3, min_samples: 2, metric: 'euclidean', cluster_selection_method: 'eom', cluster_selection_epsilon: 0.0, ...common };
+                };
+
+                const normalizePlanParams = (method, params = {}) => {
+                    const merged = { ...defaultPlanParams(method), ...(params || {}) };
+                    merged.reduce_params = {
+                        ...(defaultPlanParams(method).reduce_params || {}),
+                        ...((params || {}).reduce_params || {})
+                    };
+                    return merged;
+                };
+
+                const cleanPlanParams = (method, params = {}) => {
+                    const p = normalizePlanParams(method, params);
+                    const out = {
+                        reduce_method: p.reduce_method || 'pca',
+                        reduce_params: p.reduce_method === 'umap' ? {
+                            n_neighbors: Number(p.reduce_params?.n_neighbors || 15),
+                            min_dist: Number(p.reduce_params?.min_dist || 0.1)
+                        } : {}
+                    };
+                    if (method === 'kmeans') {
+                        out.n_clusters = Number(p.n_clusters || 12);
+                        out.batch_size = Number(p.batch_size || 1024);
+                    } else if (method === 'dbscan') {
+                        out.eps = Number(p.eps || 0.25);
+                        out.min_samples = Number(p.min_samples || 3);
+                        out.metric = p.metric || 'cosine';
+                    } else if (method === 'agglomerative_threshold') {
+                        out.distance_threshold = Number(p.distance_threshold || 0.25);
+                        out.linkage = p.linkage || 'average';
+                        out.metric = p.metric || 'cosine';
+                    } else {
+                        out.min_cluster_size = Number(p.min_cluster_size || 3);
+                        out.min_samples = Number(p.min_samples || 2);
+                        out.metric = p.metric || 'euclidean';
+                        out.cluster_selection_method = p.cluster_selection_method || 'eom';
+                        out.cluster_selection_epsilon = Number(p.cluster_selection_epsilon || 0);
+                    }
+                    return out;
+                };
+
+                planForm.value.params = defaultPlanParams(planForm.value.method);
 
                 // --- Computed ---
                 const activeClusterItems = computed(() => {
@@ -1498,7 +1688,13 @@
                     '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
                     '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#2f4554', '#61a0a8'
                 ];
-                const getClusterColor = (id) => colorPalette[id % colorPalette.length];
+                const getClusterColor = (id) => {
+                    if (id === 'noise' || id === -1) return '#9ca3af';
+                    const s = String(id ?? '0');
+                    let hash = 0;
+                    for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash) + s.charCodeAt(i);
+                    return colorPalette[Math.abs(hash) % colorPalette.length];
+                };
 
                 // --- API Actions ---
 
@@ -1642,6 +1838,7 @@
                     aggViewTab.value = 'offline';
                     selectedPlanId.value = planId;
                     selectedOfflineClusterId.value = '';
+                    aggActiveCluster.value = null;
                     offlineLatest.value = null;
                     onlineState.value = null;
 
@@ -1673,6 +1870,7 @@
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.error || 'Failed to load offline latest');
                         offlineLatest.value = data || null;
+                        if (aggViewTab.value === 'visual') nextTick(() => renderAggregationChart());
                     } catch (e) {
                         showToast(e.message, 'error');
                     }
@@ -1688,6 +1886,88 @@
                     } catch (e) {
                         showToast(e.message, 'error');
                     }
+                };
+
+                const showAggregationVisual = () => {
+                    aggViewTab.value = 'visual';
+                    nextTick(() => renderAggregationChart());
+                };
+
+                const renderAggregationChart = () => {
+                    if (!aggChartContainer.value) return;
+                    if (aggChartInstance) aggChartInstance.dispose();
+
+                    const points = (offlineLatest.value && offlineLatest.value.points) ? offlineLatest.value.points : [];
+                    aggChartInstance = echarts.init(aggChartContainer.value);
+
+                    const dataWithStyle = points.map(p => {
+                        const clusterId = p.cluster || 'noise';
+                        const isFocused = aggActiveCluster.value === null || clusterId === aggActiveCluster.value;
+                        return {
+                            value: [p.x, p.y, clusterId, p.preview || '', p.doc_id],
+                            itemStyle: {
+                                color: isFocused ? getClusterColor(clusterId) : '#e5e7eb',
+                                opacity: isFocused ? 0.8 : 0.15,
+                                borderColor: '#fff',
+                                borderWidth: isFocused ? 0.5 : 0
+                            },
+                            z: isFocused ? 10 : 0
+                        };
+                    });
+
+                    aggChartInstance.setOption({
+                        backgroundColor: '#f8fafc',
+                        tooltip: {
+                            trigger: 'item',
+                            formatter: function (params) {
+                                const v = params.data.value;
+                                return `<div style="max-width:320px; white-space:normal;">
+                                    <div style="font-weight:bold;margin-bottom:4px;">${v[2]}</div>
+                                    <div style="font-size:11px;color:#888;margin-bottom:4px;">${v[4]}</div>
+                                    <div style="font-size:12px;line-height:1.4;">${v[3] || ''}</div>
+                                </div>`;
+                            }
+                        },
+                        grid: { left: 20, right: 20, top: 20, bottom: 20, containLabel: false },
+                        xAxis: { show: false, scale: true, type: 'value' },
+                        yAxis: { show: false, scale: true, type: 'value' },
+                        dataZoom: [
+                            { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+                            { type: 'inside', yAxisIndex: 0, filterMode: 'none' }
+                        ],
+                        series: [{
+                            type: 'scatter',
+                            symbolSize: aggActiveCluster.value === null ? 6 : 8,
+                            data: dataWithStyle,
+                            emphasis: {
+                                scale: true,
+                                scaleSize: 12,
+                                itemStyle: {
+                                    borderColor: '#fff',
+                                    borderWidth: 2,
+                                    shadowBlur: 10,
+                                    shadowColor: 'rgba(0,0,0,0.3)',
+                                    opacity: 1
+                                }
+                            }
+                        }]
+                    });
+
+                    aggChartInstance.on('click', function (params) {
+                        focusAggregationCluster(params.data.value[2]);
+                    });
+                };
+
+                const focusAggregationCluster = (clusterId) => {
+                    aggActiveCluster.value = clusterId;
+                    selectedOfflineClusterId.value = clusterId;
+                    renderAggregationChart();
+                    if (clusterId && clusterId !== 'noise') loadOfflineClusterItems(clusterId);
+                };
+
+                const resetAggregationVisualFocus = () => {
+                    aggActiveCluster.value = null;
+                    renderAggregationChart();
                 };
 
                 const selectOfflineCluster = async (clusterId) => {
@@ -1801,7 +2081,9 @@
                         planForm.value.max_points = p.max_points || 50000;
                         planForm.value.enable_online = !!p.enable_online;
                         planForm.value.persist = !!p.persist;
-                        planForm.value.params_json = JSON.stringify(p.params || {}, null, 2);
+                        planForm.value.params = normalizePlanParams(planForm.value.method, p.params || {});
+                        planForm.value.time_field = p.time_field || 'timestamp';
+                        planForm.value.custom_time_field = '';
                     } else {
                         planForm.value.mode = 'create';
                         planForm.value.collection_name = selectedCollection.value;
@@ -1811,7 +2093,9 @@
                         planForm.value.max_points = 50000;
                         planForm.value.enable_online = true;
                         planForm.value.persist = true;
-                        planForm.value.params_json = JSON.stringify({ min_cluster_size: 3, min_samples: 2 }, null, 2);
+                        planForm.value.params = defaultPlanParams(planForm.value.method);
+                        planForm.value.time_field = 'timestamp';
+                        planForm.value.custom_time_field = '';
                     }
 
                     showPlanModal.value = true;
@@ -1819,13 +2103,7 @@
 
                 const savePlanFromModal = async () => {
                     try {
-                        let params = {};
-                        try {
-                            params = planForm.value.params_json.trim() ? JSON.parse(planForm.value.params_json) : {};
-                        } catch (e) {
-                            showToast('Invalid params JSON', 'error');
-                            return;
-                        }
+                        const params = cleanPlanParams(planForm.value.method, planForm.value.params);
 
                         const tf = (planForm.value.time_field === '__custom__')
                             ? (planForm.value.custom_time_field || '').trim()
@@ -2238,6 +2516,10 @@
                   if (aggRangeMode.value === 'manual') updateAggTimeRangeFromManual();
                 });
 
+                watch(() => planForm.value.method, (method) => {
+                    planForm.value.params = defaultPlanParams(method);
+                });
+
                 return {
                     currentTab, collections, selectedCollection, stats, showCreateModal, newCollectionForm, toast,
                     browseData, browsePage, pageSize, searchQuery, filterJson, topN, minScore, searchResults, upsertForm,
@@ -2255,6 +2537,8 @@
 
                     offlineLatest, offlineClustersList, filteredOfflineClusters,
                     offlineClusterFilter, selectedOfflineClusterId, selectedOfflineCluster, selectOfflineCluster,
+                    aggChartContainer, aggActiveCluster, showAggregationVisual,
+                    renderAggregationChart, focusAggregationCluster, resetAggregationVisualFocus,
 
                     onlineState, onlineClustersCount, onlineDocCount,
                     onlineClusterFilter, filteredOnlineClusters,
