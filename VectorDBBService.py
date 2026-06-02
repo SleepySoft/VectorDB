@@ -7,6 +7,7 @@ import uuid
 import logging
 import argparse
 import tempfile
+import threading
 from enum import Enum
 from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,129 @@ class ServiceUnavailable(Exception):
         self.reason = reason
 
 
+class AsyncJobManager:
+    """
+    Lightweight in-process job manager for long-running API work.
+
+    Jobs are intentionally process-local. For multi-process deployment, replace
+    this with a durable queue/backend while keeping the HTTP contract unchanged.
+    """
+
+    def __init__(self, max_workers: int = 4, max_jobs: int = 1000, ttl_sec: int = 24 * 3600):
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="VectorJob")
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        self._max_jobs = max_jobs
+        self._ttl_sec = ttl_sec
+
+    def submit(
+            self,
+            job_type: str,
+            fn: Callable[[], Any],
+            *,
+            result_kind: str = "json",
+            metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        self.cleanup()
+        job_id = str(uuid.uuid4())
+        now = time.time()
+        job = {
+            "job_id": job_id,
+            "type": job_type,
+            "status": "pending",
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "progress": None,
+            "error": None,
+            "result": None,
+            "result_kind": result_kind,
+            "metadata": metadata or {},
+        }
+
+        with self._lock:
+            if len(self._jobs) >= self._max_jobs:
+                raise ServiceUnavailable(ServiceUnavailable.Code.BUSY, "Job queue is full")
+            self._jobs[job_id] = job
+
+        future = self._executor.submit(self._run_job, job_id, fn)
+        with self._lock:
+            self._jobs[job_id]["future"] = future
+        return self.public_view(job_id)
+
+    def _run_job(self, job_id: str, fn: Callable[[], Any]):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            job["status"] = "running"
+            job["started_at"] = time.time()
+
+        try:
+            result = fn()
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job:
+                    job["status"] = "succeeded"
+                    job["result"] = result
+                    job["finished_at"] = time.time()
+        except Exception as e:
+            logger.error(f"Async job {job_id} failed: {e}")
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = str(e)
+                    job["finished_at"] = time.time()
+
+    def get(self, job_id: str, include_result: bool = False) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            out = dict(job)
+            out.pop("future", None)
+            if not include_result:
+                out.pop("result", None)
+            return out
+
+    def public_view(self, job_id: str) -> Dict[str, Any]:
+        job = self.get(job_id, include_result=False)
+        if not job:
+            return {}
+        job["status_url"] = f"/api/jobs/{job_id}"
+        job["result_url"] = f"/api/jobs/{job_id}/result"
+        return job
+
+    def cancel(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            future = job.get("future")
+            if future and future.cancel():
+                job["status"] = "canceled"
+                job["finished_at"] = time.time()
+            out = dict(job)
+            out.pop("future", None)
+            out.pop("result", None)
+            return out
+
+    def cleanup(self) -> int:
+        now = time.time()
+        removed = 0
+        with self._lock:
+            expired = []
+            for job_id, job in self._jobs.items():
+                finished_at = job.get("finished_at")
+                if finished_at and (now - finished_at > self._ttl_sec):
+                    expired.append(job_id)
+            for job_id in expired:
+                del self._jobs[job_id]
+                removed += 1
+        return removed
+
+
 class VectorDBService:
     """
     VectorDBService: The Web API Layer.
@@ -83,6 +207,7 @@ class VectorDBService:
         self._analysis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AnalysisWorker")
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
         self._aggregation_jobs: Dict[str, Dict[str, Any]] = {}
+        self._job_manager = AsyncJobManager(max_workers=4)
 
         self.metrics = {
             'service_unavailable_count': 0,
@@ -166,6 +291,15 @@ class VectorDBService:
                 raise ValueError(f"Collection '{name}' not found. Please create it via POST /api/collections first.")
             return repo
 
+        def accepted_job_response(job: Dict[str, Any]):
+            return jsonify({
+                "status": "accepted",
+                "job_id": job["job_id"],
+                "type": job["type"],
+                "status_url": job["status_url"],
+                "result_url": job["result_url"],
+            }), 202
+
         # --- Routes ---
 
         @route("/")
@@ -183,6 +317,50 @@ class VectorDBService:
         @route("/api/health")
         def health_check():
             return jsonify({"status": "ok", "service": "VectorDBService"})
+
+        @route("/api/jobs/<job_id>", methods=["GET"])
+        def get_job(job_id):
+            job = self._job_manager.public_view(job_id)
+            if not job:
+                return jsonify({"error": "Job not found"}), 404
+            return jsonify(job)
+
+        @route("/api/jobs/<job_id>", methods=["DELETE"])
+        def cancel_job(job_id):
+            job = self._job_manager.cancel(job_id)
+            if not job:
+                return jsonify({"error": "Job not found"}), 404
+            return jsonify(job)
+
+        @route("/api/jobs/<job_id>/result", methods=["GET"])
+        def get_job_result(job_id):
+            job = self._job_manager.get(job_id, include_result=True)
+            if not job:
+                return jsonify({"error": "Job not found"}), 404
+
+            status = job.get("status")
+            if status in ("pending", "running"):
+                public_job = self._job_manager.public_view(job_id)
+                return jsonify(public_job), 202
+            if status == "failed":
+                return jsonify({"status": "failed", "error": job.get("error")}), 500
+            if status == "canceled":
+                return jsonify({"status": "canceled"}), 409
+
+            result = job.get("result")
+            if job.get("result_kind") == "file":
+                file_path = (result or {}).get("file_path") if isinstance(result, dict) else result
+                filename = (result or {}).get("filename") if isinstance(result, dict) else None
+                if not file_path or not os.path.exists(file_path):
+                    return jsonify({"error": "Job result file is no longer available"}), 410
+                return send_file(
+                    file_path,
+                    as_attachment=True,
+                    download_name=filename or os.path.basename(file_path),
+                    mimetype="application/zip"
+                )
+
+            return jsonify(result if result is not None else {})
 
         @route("/api/collections", methods=["POST"])
         def create_collection():
@@ -429,6 +607,43 @@ class VectorDBService:
                 logger.error(f"Search failed: {e}")
                 return jsonify({"error": str(e)}), 500
 
+        @route("/api/collections/<name>/search-jobs", methods=["POST"])
+        def submit_search_job(name):
+            data = request.json or {}
+            query = data.get("query")
+            if not query:
+                return jsonify({"error": "query string is required"}), 400
+
+            try:
+                get_repo_strict(name)
+
+                top_n = int(data.get("top_n", 5))
+                score_threshold = float(data.get("score_threshold", 0.0))
+                filter_criteria = data.get("filter_criteria", None)
+
+                def run_search():
+                    repo = get_repo_strict(name)
+                    return repo.search(
+                        query_text=query,
+                        top_n=top_n,
+                        score_threshold=score_threshold,
+                        filter_criteria=filter_criteria
+                    )
+
+                job = self._job_manager.submit(
+                    "collection.search",
+                    run_search,
+                    metadata={"collection": name, "top_n": top_n}
+                )
+                return accepted_job_response(job)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 404
+            except ServiceUnavailable as e:
+                raise e
+            except Exception as e:
+                logger.error(f"Search job submission failed: {e}")
+                return jsonify({"error": str(e)}), 500
+
         @route("/api/collections/<name>/documents/<doc_id>", methods=["DELETE"])
         def delete_document(name, doc_id):
             try:
@@ -458,6 +673,29 @@ class VectorDBService:
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
+        @route("/api/collections/<name>/clear-jobs", methods=["POST"])
+        def submit_clear_job(name):
+            try:
+                get_repo_strict(name)
+
+                def run_clear():
+                    repo = get_repo_strict(name)
+                    repo.clear()
+                    return {"status": "cleared", "collection": name}
+
+                job = self._job_manager.submit(
+                    "collection.clear",
+                    run_clear,
+                    metadata={"collection": name}
+                )
+                return accepted_job_response(job)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 404
+            except ServiceUnavailable as e:
+                raise e
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
         @route("/api/admin/backup", methods=["GET"])
         def download_backup():
             """
@@ -476,6 +714,27 @@ class VectorDBService:
                     download_name=filename,
                     mimetype='application/zip'
                 )
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        @route("/api/admin/backup-jobs", methods=["POST"])
+        def submit_backup_job():
+            try:
+                if not self.engine.is_ready():
+                    raise ServiceUnavailable(ServiceUnavailable.Code.INIT, "Engine is initializing")
+
+                def run_backup():
+                    temp_dir = tempfile.mkdtemp()
+                    zip_path = self.engine.create_backup(temp_dir)
+                    return {
+                        "file_path": zip_path,
+                        "filename": os.path.basename(zip_path),
+                    }
+
+                job = self._job_manager.submit("admin.backup", run_backup, result_kind="file")
+                return accepted_job_response(job)
+            except ServiceUnavailable as e:
+                raise e
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
@@ -510,6 +769,44 @@ class VectorDBService:
                 return jsonify({"status": "success", "message": "Database restored and reloaded."})
             except Exception as e:
                 return jsonify({"error": f"Restore failed: {str(e)}"}), 500
+
+        @route("/api/admin/restore-jobs", methods=["POST"])
+        def submit_restore_job():
+            if 'file' not in request.files:
+                return jsonify({"error": "No file part"}), 400
+
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({"error": "No selected file"}), 400
+            if not file.filename.endswith('.zip'):
+                return jsonify({"error": "Only .zip files are allowed"}), 400
+
+            try:
+                temp_fd, temp_path = tempfile.mkstemp(suffix=".zip")
+                os.close(temp_fd)
+                file.save(temp_path)
+
+                def run_restore():
+                    try:
+                        self.engine.restore_backup(temp_path)
+                        return {"status": "success", "message": "Database restored and reloaded."}
+                    finally:
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+
+                job = self._job_manager.submit("admin.restore", run_restore)
+                return accepted_job_response(job)
+            except ServiceUnavailable as e:
+                raise e
+            except Exception as e:
+                try:
+                    if 'temp_path' in locals() and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except OSError:
+                    pass
+                return jsonify({"error": str(e)}), 500
 
         # Get list of all collections
         @route("/api/collections", methods=["GET"])
@@ -739,6 +1036,32 @@ class VectorDBService:
                 scan_limit = int(request.args.get("scan_limit", 20000))
                 stats = repo.timestamp_stats(time_field=time_field, scan_limit=scan_limit, offset=0)
                 return jsonify(stats)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        @route("/api/collections/<name>/timestamp_stats-jobs", methods=["POST"])
+        def submit_collection_timestamp_stats_job(name):
+            data = request.json or {}
+            try:
+                get_repo_strict(name)
+                time_field = data.get("time_field", "timestamp")
+                scan_limit = int(data.get("scan_limit", 20000))
+                offset = int(data.get("offset", 0))
+
+                def run_timestamp_stats():
+                    repo = get_repo_strict(name)
+                    return repo.timestamp_stats(time_field=time_field, scan_limit=scan_limit, offset=offset)
+
+                job = self._job_manager.submit(
+                    "collection.timestamp_stats",
+                    run_timestamp_stats,
+                    metadata={"collection": name, "time_field": time_field, "scan_limit": scan_limit}
+                )
+                return accepted_job_response(job)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 404
+            except ServiceUnavailable as e:
+                raise e
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 

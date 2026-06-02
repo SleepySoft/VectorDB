@@ -1,5 +1,6 @@
 # VectorDB/VectorDBClient.py
 
+import os
 import time
 import requests
 import random
@@ -225,6 +226,98 @@ class VectorDBClient:
         self._circuit_breaker = CircuitBreaker()
         logger.info("Circuit breaker manually reset")
 
+    def get_job(self, job_id: str) -> Dict[str, Any]:
+        resp = requests.get(f"{self.base_url}/api/jobs/{job_id}", timeout=10)
+        return RemoteCollection._static_handle_response(resp)
+
+    def get_job_result(self, job_id: str, request_timeout: int = 30) -> Any:
+        resp = requests.get(f"{self.base_url}/api/jobs/{job_id}/result", timeout=request_timeout)
+        return RemoteCollection._static_handle_response(resp)
+
+    def wait_job_result(
+            self,
+            job_id: str,
+            timeout: float = 120.0,
+            poll_interval: float = 1.0,
+            result_request_timeout: int = 30
+    ) -> Any:
+        return RemoteCollection._wait_job_result(
+            self.base_url,
+            job_id,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            result_request_timeout=result_request_timeout
+        )
+
+    def backup_async(self) -> Dict[str, Any]:
+        resp = requests.post(f"{self.base_url}/api/admin/backup-jobs", timeout=10)
+        return RemoteCollection._static_handle_response(resp)
+
+    def download_backup(
+            self,
+            destination_path: Optional[str] = None,
+            timeout: float = 300.0,
+            poll_interval: float = 2.0
+    ) -> str:
+        job = self.backup_async()
+        job_id = job["job_id"]
+        self._wait_job_succeeded(job_id, timeout=timeout, poll_interval=poll_interval)
+
+        resp = requests.get(f"{self.base_url}/api/jobs/{job_id}/result", stream=True, timeout=60)
+        resp.raise_for_status()
+
+        if destination_path is None:
+            destination_path = self._filename_from_response(resp) or "vectordb_backup.zip"
+
+        with open(destination_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        return os.path.abspath(destination_path)
+
+    def restore_backup_async(self, zip_file_path: str) -> Dict[str, Any]:
+        with open(zip_file_path, "rb") as f:
+            files = {"file": (os.path.basename(zip_file_path), f, "application/zip")}
+            resp = requests.post(f"{self.base_url}/api/admin/restore-jobs", files=files, timeout=30)
+        return RemoteCollection._static_handle_response(resp)
+
+    def restore_backup(
+            self,
+            zip_file_path: str,
+            timeout: float = 300.0,
+            poll_interval: float = 2.0
+    ) -> Dict[str, Any]:
+        job = self.restore_backup_async(zip_file_path)
+        return self.wait_job_result(job["job_id"], timeout=timeout, poll_interval=poll_interval)
+
+    def _wait_job_succeeded(self, job_id: str, timeout: float, poll_interval: float) -> Dict[str, Any]:
+        start_time = time.time()
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise VectorDBTimeoutError(f"Job {job_id} timed out after {elapsed:.2f}s")
+
+            job = self.get_job(job_id)
+            status = job.get("status")
+            if status == "succeeded":
+                return job
+            if status == "failed":
+                raise RuntimeError(f"Job {job_id} failed: {job.get('error')}")
+            if status == "canceled":
+                raise RuntimeError(f"Job {job_id} was canceled")
+
+            remaining = timeout - (time.time() - start_time)
+            time.sleep(min(poll_interval, max(0.0, remaining)))
+
+    @staticmethod
+    def _filename_from_response(resp: requests.Response) -> Optional[str]:
+        content_disposition = resp.headers.get("Content-Disposition", "")
+        marker = "filename="
+        if marker not in content_disposition:
+            return None
+        filename = content_disposition.split(marker, 1)[1].split(";", 1)[0].strip()
+        return filename.strip('"') or None
+
     # -------------------
     # Collection management
     # -------------------
@@ -357,7 +450,8 @@ class RemoteCollection:
     """
 
     def __init__(self, base_url: str, name: str):
-        self.api_url = f"{base_url}/api/collections/{name}"
+        self.base_url = base_url.rstrip("/")
+        self.api_url = f"{self.base_url}/api/collections/{name}"
         self.name = name
 
     # -------------
@@ -416,6 +510,38 @@ class RemoteCollection:
             return {}
         return resp.json()
 
+    @staticmethod
+    def _wait_job_result(
+            base_url: str,
+            job_id: str,
+            timeout: float = 120.0,
+            poll_interval: float = 1.0,
+            result_request_timeout: int = 30
+    ) -> Any:
+        start_time = time.time()
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise VectorDBTimeoutError(f"Job {job_id} timed out after {elapsed:.2f}s")
+
+            resp = requests.get(f"{base_url}/api/jobs/{job_id}", timeout=10)
+            job = RemoteCollection._static_handle_response(resp)
+            status = job.get("status")
+
+            if status == "succeeded":
+                result_resp = requests.get(
+                    f"{base_url}/api/jobs/{job_id}/result",
+                    timeout=result_request_timeout
+                )
+                return RemoteCollection._static_handle_response(result_resp)
+            if status == "failed":
+                raise RuntimeError(f"Job {job_id} failed: {job.get('error')}")
+            if status == "canceled":
+                raise RuntimeError(f"Job {job_id} was canceled")
+
+            remaining = timeout - (time.time() - start_time)
+            time.sleep(min(poll_interval, max(0.0, remaining)))
+
     # ----------------
     # Existing APIs
     # ----------------
@@ -443,6 +569,8 @@ class RemoteCollection:
             score_threshold: float = 0.0,
             filter_criteria: Optional[Dict] = None,
             timeout: int = 30,
+            wait: bool = True,
+            poll_interval: float = 1.0,
     ) -> List[Dict]:
         payload = {
             "query": query,
@@ -450,7 +578,22 @@ class RemoteCollection:
             "score_threshold": score_threshold,
             "filter_criteria": filter_criteria
         }
-        resp = requests.post(f"{self.api_url}/search", json=payload, timeout=timeout)
+        resp = requests.post(f"{self.api_url}/search-jobs", json=payload, timeout=min(10, timeout))
+        if resp.status_code == 202:
+            job = resp.json()
+            if not wait:
+                return job
+            return self._wait_job_result(
+                self.base_url,
+                job["job_id"],
+                timeout=timeout,
+                poll_interval=poll_interval,
+                result_request_timeout=timeout
+            )
+
+        # Backward compatibility when talking to an older service instance.
+        if resp.status_code == 404 and "search-jobs" in resp.request.url:
+            resp = requests.post(f"{self.api_url}/search", json=payload, timeout=timeout)
         return self._handle_response(resp)
 
     def delete(self, doc_id: str) -> bool:
@@ -464,8 +607,24 @@ class RemoteCollection:
         resp = requests.get(f"{self.api_url}/stats", timeout=10)
         return self._handle_response(resp)
 
-    def clear(self) -> bool:
-        resp = requests.post(f"{self.api_url}/clear", timeout=30)
+    def clear(self, timeout: int = 120, wait: bool = True, poll_interval: float = 1.0) -> bool:
+        resp = requests.post(f"{self.api_url}/clear-jobs", timeout=min(10, timeout))
+        if resp.status_code == 202:
+            job = resp.json()
+            if not wait:
+                return job
+            res = self._wait_job_result(
+                self.base_url,
+                job["job_id"],
+                timeout=timeout,
+                poll_interval=poll_interval,
+                result_request_timeout=30
+            )
+            return res.get("status") == "cleared"
+
+        # Backward compatibility when talking to an older service instance.
+        if resp.status_code == 404 and "clear-jobs" in resp.request.url:
+            resp = requests.post(f"{self.api_url}/clear", timeout=30)
         res = self._handle_response(resp)
         return res.get("status") == "cleared"
 
@@ -519,12 +678,35 @@ class RemoteCollection:
     # ----------------
     # NEW: timestamp_stats
     # ----------------
-    def timestamp_stats(self, time_field: str = "timestamp", scan_limit: int = 20000) -> Dict[str, Any]:
+    def timestamp_stats(
+            self,
+            time_field: str = "timestamp",
+            scan_limit: int = 20000,
+            timeout: int = 120,
+            wait: bool = True,
+            poll_interval: float = 1.0
+    ) -> Dict[str, Any]:
         """
         GET /api/collections/<name>/timestamp_stats?time_field=...&scan_limit=...
         """
-        params = {"time_field": time_field, "scan_limit": int(scan_limit)}
-        resp = requests.get(f"{self.api_url}/timestamp_stats", params=params, timeout=20)
+        payload = {"time_field": time_field, "scan_limit": int(scan_limit)}
+        resp = requests.post(f"{self.api_url}/timestamp_stats-jobs", json=payload, timeout=min(10, timeout))
+        if resp.status_code == 202:
+            job = resp.json()
+            if not wait:
+                return job
+            return self._wait_job_result(
+                self.base_url,
+                job["job_id"],
+                timeout=timeout,
+                poll_interval=poll_interval,
+                result_request_timeout=30
+            )
+
+        # Backward compatibility when talking to an older service instance.
+        if resp.status_code == 404 and "timestamp_stats-jobs" in resp.request.url:
+            params = {"time_field": time_field, "scan_limit": int(scan_limit)}
+            resp = requests.get(f"{self.api_url}/timestamp_stats", params=params, timeout=20)
         return self._handle_response(resp)
 
     # ----------------

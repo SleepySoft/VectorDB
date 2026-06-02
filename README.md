@@ -63,3 +63,8 @@ conda install -c conda-forge <package_name>
 Windows 11 的“智能应用控制 (Smart App Control)”会无差别拦截无签名的开发者库。如果你是开发者，建议在系统设置中搜索并将其直接**关闭**。
 
 ```
+
+
+# 其它注意事项
+
++ 当前 job 管理是进程内内存实现，适合单进程服务。后续如果部署成多进程或需要服务重启后恢复任务，应把 AsyncJobManager 替换成持久化队列/状态后端，例如 Redis、SQLite、Celery/RQ，但现有 HTTP 和 client 调用契约可以保持不变。

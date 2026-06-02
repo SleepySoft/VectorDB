@@ -299,7 +299,7 @@ class VectorStorageEngine:
         }
 
         try:
-            self._queue.put(batch_task, block=True, timeout=5)
+            self._queue.put(batch_task, block=False)
 
             with self._pending_lock:
                 for item in tasks:
