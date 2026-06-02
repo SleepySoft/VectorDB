@@ -1002,6 +1002,7 @@ class VectorDBService:
             plan = AggregationPlan(
                 plan_id=data["plan_id"],
                 collection_name=data["collection_name"],
+                name=data.get("name", ""),
                 time_window_sec=int(data.get("time_window_sec", 24 * 3600)),
                 run_every_sec=int(data.get("run_every_sec", 3600)),
                 filter_criteria=data.get("filter_criteria", {}),
@@ -1012,6 +1013,7 @@ class VectorDBService:
                 semantic_only=bool(data.get("semantic_only", True)),
                 enable_online=bool(data.get("enable_online", True)),
                 persist=bool(data.get("persist", True)),
+                exclusive_collection=bool(data.get("exclusive_collection", False)),
                 time_field=data.get("time_field", "timestamp")
             )
 
@@ -1562,7 +1564,7 @@ def main():
         return OnlineMicroClusterManager(engine, plan, store)
 
     # 4. Cluster manager
-    registry = AggregationRegistry(max_plans=3, max_plans_per_collection=1)
+    registry = AggregationRegistry(max_plans=50, max_plans_per_collection=20)
 
     cluster_mgr = ClusterManager(
         engine=engine_instance,

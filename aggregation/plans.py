@@ -16,6 +16,7 @@ class AggregationPlan:
     """
     plan_id: str
     collection_name: str
+    name: str = ""
 
     # Data scope
     time_window_sec: int = 24 * 3600         # rolling window size (e.g., 24h)

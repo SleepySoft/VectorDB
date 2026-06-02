@@ -471,6 +471,10 @@
                                 <h2 class="text-xl font-bold text-gray-800 flex items-center">
                                     <i class="fa-solid fa-layer-group mr-3 text-indigo-600"></i> Aggregation
                                 </h2>
+                                <span v-if="selectedPlan && selectedPlan.name"
+                                    class="text-xs px-2 py-1 rounded border bg-white text-gray-700">
+                                    {{ selectedPlan.name }}
+                                </span>
                                 <span v-if="selectedPlan"
                                     class="text-xs px-2 py-1 rounded border bg-indigo-50 text-indigo-700 font-mono">
                                     {{ selectedPlan.method }}
@@ -484,9 +488,13 @@
                         </div>
 
                         <div class="flex items-center gap-2">
-                            <button :disabled="!selectedCollection" @click="openPlanModalForCreateOrEdit()"
+                            <button :disabled="!selectedCollection" @click="openPlanModalForCreateOrEdit('create')"
                                 class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm disabled:opacity-50">
-                                <i class="fa-solid fa-gear mr-2 text-gray-400"></i>{{ selectedPlanId ? 'Edit Plan' : 'Create Plan' }}
+                                <i class="fa-solid fa-plus mr-2 text-gray-400"></i>Create Plan
+                            </button>
+                            <button :disabled="!selectedPlanId" @click="openPlanModalForCreateOrEdit('edit')"
+                                class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm disabled:opacity-50">
+                                <i class="fa-solid fa-gear mr-2 text-gray-400"></i>Edit Plan
                             </button>
                             <button @click="refreshSelectedPlanViews()" :disabled="!selectedPlanId || aggRefreshLoading"
                                 class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm disabled:opacity-50">
@@ -564,7 +572,8 @@
                                     class="p-3 rounded border cursor-pointer hover:bg-indigo-50"
                                     :class="selectedPlanId === p.plan_id ? 'border-indigo-400 bg-indigo-50' : 'border-gray-100'"
                                     @click="selectPlan(p.plan_id)">
-                                    <div class="font-mono text-xs font-bold text-indigo-700 truncate">{{ p.plan_id }}</div>
+                                    <div class="text-sm font-bold text-gray-800 truncate">{{ p.name || p.plan_id }}</div>
+                                    <div class="font-mono text-[11px] text-indigo-700 truncate mt-0.5">{{ p.plan_id }}</div>
                                     <div class="mt-2 flex items-center justify-between text-xs text-gray-500">
                                         <span>{{ p.method }}</span>
                                         <span>{{ p.max_points }} pts</span>
@@ -1244,21 +1253,28 @@
                 <!-- Plan Modal -->
                 <div v-if="showPlanModal"
                     class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" v-cloak>
-                    <div class="bg-white rounded-lg p-6 w-[520px] shadow-xl space-y-4">
+                    <div class="bg-white rounded-lg p-6 w-[620px] shadow-xl space-y-4">
                         <div class="flex items-center justify-between border-b pb-2">
-                            <h3 class="text-lg font-bold">Create / Edit Plan</h3>
+                            <h3 class="text-lg font-bold">{{ planForm.mode === 'edit' ? 'Edit Plan' : 'Create Plan' }}</h3>
                             <button @click="showPlanModal = false" class="text-gray-400 hover:text-gray-600">
                                 <i class="fa-solid fa-times"></i>
                             </button>
                         </div>
 
                         <div class="space-y-3 text-sm">
-                            <div>
-                                <label class="block text-xs font-bold text-gray-500 mb-1">plan_id</label>
-                                <input v-model="planForm.plan_id" :disabled="planForm.mode==='edit'"
-                                    class="w-full p-2 border rounded font-mono text-xs bg-gray-50" />
-                                <div class="text-[11px] text-gray-400 mt-1">
-                                    For 1-plan-per-collection mode, edit will reuse existing plan_id.
+                            <div class="grid grid-cols-12 gap-3">
+                                <div class="col-span-6">
+                                    <label class="block text-xs font-bold text-gray-500 mb-1">name</label>
+                                    <input v-model="planForm.name"
+                                        class="w-full p-2 border rounded text-xs bg-white"
+                                        placeholder="e.g. Auto Discovery" />
+                                </div>
+                                <div class="col-span-6">
+                                    <label class="block text-xs font-bold text-gray-500 mb-1">plan_id</label>
+                                    <input v-model="planForm.plan_id" :disabled="planForm.mode==='edit'"
+                                        class="w-full p-2 border rounded font-mono text-xs"
+                                        :class="planForm.mode==='edit' ? 'bg-gray-100 text-gray-500' : 'bg-white'"
+                                        placeholder="e.g. agg_news_hdbscan" />
                                 </div>
                             </div>
 
@@ -1806,6 +1822,7 @@
                     mode: 'create', // create | edit
                     plan_id: '',
                     collection_name: '',
+                    name: '',
                     method: 'hdbscan',
                     window_h: 24,
                     max_points: 50000,
@@ -2370,14 +2387,27 @@
                 };
 
                 // Plan modal helpers
-                const openPlanModalForCreateOrEdit = async () => {
+                const buildDefaultPlanId = (collectionName, method = 'hdbscan') => {
+                    const safeCollection = String(collectionName || 'collection')
+                        .trim()
+                        .replace(/[^a-zA-Z0-9_]+/g, '_')
+                        .replace(/^_+|_+$/g, '')
+                        .toLowerCase() || 'collection';
+                    const safeMethod = String(method || 'hdbscan')
+                        .replace(/[^a-zA-Z0-9_]+/g, '_')
+                        .toLowerCase();
+                    return `agg_${safeCollection}_${safeMethod}_${Date.now().toString(36)}`;
+                };
+
+                const openPlanModalForCreateOrEdit = async (mode = 'auto') => {
                     if (!selectedCollection.value) return;
 
-                    if (selectedPlan.value) {
+                    if ((mode === 'edit' || mode === 'auto') && selectedPlan.value) {
                         const p = selectedPlan.value;
                         planForm.value.mode = 'edit';
                         planForm.value.plan_id = p.plan_id;
                         planForm.value.collection_name = p.collection_name;
+                        planForm.value.name = p.name || p.plan_id;
                         planForm.value.method = p.method || 'hdbscan';
                         planForm.value.window_h = Math.round((p.time_window_sec || 86400) / 3600);
                         planForm.value.max_points = p.max_points || 50000;
@@ -2389,8 +2419,9 @@
                     } else {
                         planForm.value.mode = 'create';
                         planForm.value.collection_name = selectedCollection.value;
-                        planForm.value.plan_id = `agg_${selectedCollection.value}_24h`;
+                        planForm.value.name = '';
                         planForm.value.method = 'hdbscan';
+                        planForm.value.plan_id = buildDefaultPlanId(selectedCollection.value, planForm.value.method);
                         planForm.value.window_h = 24;
                         planForm.value.max_points = 50000;
                         planForm.value.enable_online = true;
@@ -2412,10 +2443,14 @@
                             : planForm.value.time_field;
 
                         if (!tf) { showToast('time_field is required', 'error'); return; }
+                        const planId = (planForm.value.plan_id || '').trim();
+                        if (!planId) { showToast('plan_id is required', 'error'); return; }
+                        const name = (planForm.value.name || '').trim();
 
                         const payload = {
-                            plan_id: planForm.value.plan_id,
+                            plan_id: planId,
                             collection_name: planForm.value.collection_name,
+                            name,
                             time_window_sec: planForm.value.window_h * 3600,
                             run_every_sec: 3600,
                             method: planForm.value.method,
