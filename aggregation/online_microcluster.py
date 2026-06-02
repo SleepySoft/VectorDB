@@ -119,18 +119,20 @@ class OnlineMicroClusterManager(OnlineHandler):
 
     # ---------- Core logic ----------
     def _process_event(self, ev: Dict[str, Any]):
-        # We prefer embeddings_ready (contains embeddings)
+        # Prefer compact doc_vector events; keep embeddings fallback for older emitters.
         if ev.get("type") != "doc_embeddings_ready":
             return
 
         doc_id = ev.get("doc_id")
-        emb = ev.get("embeddings")  # np.ndarray
-        if doc_id is None or emb is None:
+        doc_vector = ev.get("doc_vector")
+        emb = ev.get("embeddings")
+        if doc_id is None or (doc_vector is None and emb is None):
             return
 
-        # Build doc vector by averaging chunk vectors
         try:
-            if isinstance(emb, np.ndarray):
+            if doc_vector is not None:
+                v = doc_vector
+            elif isinstance(emb, np.ndarray):
                 v = emb.mean(axis=0)
             else:
                 # in case it got serialized somehow

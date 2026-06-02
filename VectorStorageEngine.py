@@ -674,12 +674,11 @@ class VectorCollectionRepo:
         # ---- NEW: emit hook BEFORE converting to list ----
         if on_embeddings is not None:
             try:
-                # Keep payload compact: do NOT always pass chunks (may be large)
+                doc_vector = embeddings_np.mean(axis=0).astype(np.float32)
                 payload = {
                     "collection_name": self._collection_name,
                     "doc_id": doc_id,
-                    "chunk_ids": chunk_ids,
-                    "embeddings": embeddings_np,  # np.ndarray
+                    "doc_vector": doc_vector,
                     "metadata": clean_metadata,
                     "chunks_count": len(chunks),
                 }

@@ -60,7 +60,7 @@ class AsyncJobManager:
     this with a durable queue/backend while keeping the HTTP contract unchanged.
     """
 
-    def __init__(self, max_workers: int = 4, max_jobs: int = 1000, ttl_sec: int = 24 * 3600):
+    def __init__(self, max_workers: int = 4, max_jobs: int = 1000, ttl_sec: int = 3600):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="VectorJob")
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -207,7 +207,11 @@ class VectorDBService:
         self._analysis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AnalysisWorker")
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
         self._aggregation_jobs: Dict[str, Dict[str, Any]] = {}
-        self._job_manager = AsyncJobManager(max_workers=4)
+        self._job_manager = AsyncJobManager(
+            max_workers=4,
+            ttl_sec=int(os.getenv("VECTOR_JOB_TTL_SEC", "3600"))
+        )
+        self._analysis_result_ttl_sec = int(os.getenv("VECTOR_ANALYSIS_RESULT_TTL_SEC", "600"))
 
         self.metrics = {
             'service_unavailable_count': 0,
@@ -854,8 +858,13 @@ class VectorDBService:
             """
             # 1. Clean up old jobs
             current_time = time.time()
-            expired_jobs = [jid for jid, j in self._analysis_jobs.items()
-                            if current_time - j['created_at'] > 3600]
+            expired_jobs = []
+            for jid, j in self._analysis_jobs.items():
+                finished_at = j.get("finished_at")
+                if finished_at and current_time - finished_at > self._analysis_result_ttl_sec:
+                    expired_jobs.append(jid)
+                elif current_time - j['created_at'] > 3600:
+                    expired_jobs.append(jid)
             for jid in expired_jobs: del self._analysis_jobs[jid]
 
             # 2. Validation
@@ -1237,14 +1246,17 @@ class VectorDBService:
             if "error" in result:
                 self._analysis_jobs[job_id]["status"] = "failed"
                 self._analysis_jobs[job_id]["error"] = result["error"]
+                self._analysis_jobs[job_id]["finished_at"] = time.time()
             else:
                 self._analysis_jobs[job_id]["status"] = "completed"
                 self._analysis_jobs[job_id]["result"] = result
+                self._analysis_jobs[job_id]["finished_at"] = time.time()
 
         except Exception as e:
             logger.error(f"Pipeline job {job_id} failed: {e}", exc_info=True)
             self._analysis_jobs[job_id]["status"] = "failed"
             self._analysis_jobs[job_id]["error"] = str(e)
+            self._analysis_jobs[job_id]["finished_at"] = time.time()
 
     def mount_to_app(self, app: Flask, url_prefix: str = "/vector-db", wrapper: Optional[Callable] = None) -> bool:
         """

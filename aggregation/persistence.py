@@ -75,13 +75,13 @@ class InMemoryAggregationStore:
     You can later implement a SQLiteStore/RedisStore with same methods.
     """
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    _offline_versions: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)  # plan_id -> [offline_result...]
+    _offline_versions: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)  # plan_id -> latest offline result only
     _online_state: Dict[str, Dict[str, Any]] = field(default_factory=dict)           # plan_id -> online_state
 
     # ---------- Offline ----------
     def save_offline(self, plan_id: str, result: Dict[str, Any]) -> None:
         with self._lock:
-            self._offline_versions.setdefault(plan_id, []).append(result)
+            self._offline_versions[plan_id] = [result]
 
     def get_latest_offline(self, plan_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
