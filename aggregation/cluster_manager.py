@@ -160,7 +160,7 @@ class ClusterManager:
             safe = {}
             # Only allow a safe subset to avoid abuse
             for k in ("time_window_sec", "filter_criteria", "limit", "max_points", "method", "params", "semantic_only",
-                      "time_field", "time_range"):
+                      "time_field"):
                 if k in overrides:
                     safe[k] = overrides[k]
             plan2 = replace(plan, **safe)
