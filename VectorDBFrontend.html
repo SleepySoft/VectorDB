@@ -646,23 +646,39 @@
                         </aside>
 
                         <main class="bg-white border rounded-lg overflow-hidden flex flex-col min-h-0">
-                            <div class="px-4 pt-3 border-b flex gap-6">
-                                <button @click="aggViewTab='summary'" class="pb-2 text-sm font-medium"
-                                    :class="aggViewTab==='summary' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
-                                    Summary
-                                </button>
-                                <button @click="aggViewTab='clusters'" class="pb-2 text-sm font-medium"
-                                    :class="aggViewTab==='clusters' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
-                                    Clusters
-                                </button>
-                                <button @click="showAggregationVisual()" class="pb-2 text-sm font-medium"
-                                    :class="aggViewTab==='visual' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
-                                    Map
-                                </button>
-                                <button @click="aggViewTab='online'" class="pb-2 text-sm font-medium"
-                                    :class="aggViewTab==='online' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
-                                    Online
-                                </button>
+                            <div class="px-4 pt-3 border-b flex items-start justify-between gap-4">
+                                <div class="flex gap-6">
+                                    <button @click="aggViewTab='summary'" class="pb-2 text-sm font-medium"
+                                        :class="aggViewTab==='summary' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
+                                        Summary
+                                    </button>
+                                    <button @click="aggViewTab='clusters'" class="pb-2 text-sm font-medium"
+                                        :class="aggViewTab==='clusters' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
+                                        Clusters
+                                    </button>
+                                    <button @click="showAggregationVisual()" class="pb-2 text-sm font-medium"
+                                        :class="aggViewTab==='visual' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
+                                        Map
+                                    </button>
+                                    <button @click="aggViewTab='online'" class="pb-2 text-sm font-medium"
+                                        :class="aggViewTab==='online' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'">
+                                        Online
+                                    </button>
+                                </div>
+                                <div v-if="selectedOfflineClusterId"
+                                    class="mb-2 flex items-center gap-2 text-xs bg-indigo-50 border border-indigo-100 rounded px-2 py-1 text-indigo-700">
+                                    <span class="text-gray-500">Selected</span>
+                                    <span class="font-mono font-bold" :style="{ color: getClusterColor(selectedOfflineClusterId) }">{{ selectedOfflineClusterId }}</span>
+                                    <span class="text-gray-400">{{ selectedOfflineCluster?.size || 0 }} docs</span>
+                                    <button v-if="aggViewTab !== 'visual'" @click="showAggregationVisual"
+                                        class="px-2 py-0.5 bg-white border rounded hover:bg-gray-50 text-gray-600">
+                                        View Map
+                                    </button>
+                                    <button @click="resetAggregationVisualFocus"
+                                        class="px-2 py-0.5 bg-white border rounded hover:bg-gray-50 text-gray-600">
+                                        Show All
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="flex-1 min-h-0 overflow-auto scroller p-4">
@@ -699,7 +715,13 @@
                                     <div class="flex items-center justify-between">
                                         <input v-model="offlineClusterFilter" placeholder="Filter clusters..."
                                             class="text-sm p-2 border rounded w-64 bg-white" />
-                                        <span class="text-xs text-gray-400">{{ filteredOfflineClusters.length }} clusters</span>
+                                        <div class="flex items-center gap-2">
+                                            <button v-if="selectedOfflineClusterId" @click="resetAggregationVisualFocus"
+                                                class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                                Show All
+                                            </button>
+                                            <span class="text-xs text-gray-400">{{ filteredOfflineClusters.length }} clusters</span>
+                                        </div>
                                     </div>
                                     <div v-if="filteredOfflineClusters.length === 0" class="p-8 text-center text-gray-400 border rounded bg-gray-50">
                                         No clusters.
@@ -737,6 +759,15 @@
                                     <div v-else-if="offlineVisualizationIsFallback"
                                         class="absolute top-3 left-3 max-w-[420px] text-[11px] px-3 py-2 rounded border bg-white/95 text-gray-600 shadow-sm">
                                         Fallback layout: latest has no saved x/y points, so positions are generated from cluster membership.
+                                    </div>
+                                    <div v-if="selectedOfflineClusterId"
+                                        class="absolute top-3 right-3 flex items-center gap-2 text-xs px-3 py-2 rounded border bg-white/95 text-gray-700 shadow-sm">
+                                        <span class="text-gray-500">Focus</span>
+                                        <span class="font-mono font-bold" :style="{ color: getClusterColor(selectedOfflineClusterId) }">{{ selectedOfflineClusterId }}</span>
+                                        <button @click="resetAggregationVisualFocus"
+                                            class="px-2 py-0.5 bg-white border rounded hover:bg-gray-100">
+                                            Show All
+                                        </button>
                                     </div>
                                 </div>
 
@@ -2485,6 +2516,10 @@
                 };
 
                 const focusAggregationCluster = (clusterId) => {
+                    if (selectedOfflineClusterId.value === clusterId) {
+                        resetAggregationVisualFocus();
+                        return;
+                    }
                     aggActiveCluster.value = clusterId;
                     selectedOfflineClusterId.value = clusterId;
                     renderAggregationChart();
@@ -2500,6 +2535,10 @@
                 };
 
                 const selectOfflineCluster = async (clusterId) => {
+                    if (selectedOfflineClusterId.value === clusterId) {
+                        resetAggregationVisualFocus();
+                        return;
+                    }
                     selectedOfflineClusterId.value = clusterId;
                     aggActiveCluster.value = clusterId;
                     if (aggViewTab.value === 'visual') renderAggregationChart();
