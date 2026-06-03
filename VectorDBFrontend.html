@@ -509,47 +509,92 @@
                         </div>
                     </div>
 
-                    <div class="border-b bg-slate-50 px-6 py-3 flex items-center justify-between flex-shrink-0">
-                        <div class="flex flex-wrap items-center gap-3 text-xs">
-                            <span class="font-bold text-gray-500">Run Override</span>
-                            <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
-                                <input type="radio" value="plan" v-model="aggRangeMode" class="accent-indigo-600">
-                                Plan Default
-                            </label>
-                            <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
-                                <input type="radio" value="auto" v-model="aggRangeMode" class="accent-indigo-600">
-                                Auto Range
-                            </label>
-                            <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
-                                <input type="radio" value="manual" v-model="aggRangeMode" class="accent-indigo-600">
-                                Manual Range
-                            </label>
-                            <select v-if="aggRangeMode === 'auto'" v-model="aggPreset" @change="applyPresetToManual()"
-                                class="p-2 border rounded bg-white">
-                                <option value="3600">1h</option>
-                                <option value="21600">6h</option>
-                                <option value="43200">12h</option>
-                                <option value="86400">24h</option>
-                                <option value="604800">7d</option>
-                                <option value="custom">custom</option>
-                            </select>
-                            <input v-if="aggRangeMode === 'auto' && aggPreset === 'custom'"
-                                v-model.number="aggPresetCustomSec" type="number" min="60"
-                                class="w-28 p-2 border rounded bg-white font-mono" />
-                            <input v-if="aggRangeMode === 'manual'" type="datetime-local" v-model="aggManualStartLocal"
-                                class="p-2 border rounded bg-white" />
-                            <input v-if="aggRangeMode === 'manual'" type="datetime-local" v-model="aggManualEndLocal"
-                                class="p-2 border rounded bg-white" />
-                            <span v-if="aggRangeMode === 'plan'" class="text-gray-400">
-                                no override; uses saved plan window and time_field
-                            </span>
-                            <select v-if="aggRangeMode !== 'plan'" v-model="selectedTimeFieldOption"
-                                class="p-2 border rounded bg-white font-mono">
-                                <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">{{ f.key }}</option>
-                                <option value="__custom__">Custom...</option>
-                            </select>
-                            <input v-if="aggRangeMode !== 'plan' && selectedTimeFieldOption === '__custom__'" v-model="aggregationTimeField"
-                                class="p-2 border rounded bg-white font-mono" placeholder="time_field" />
+                    <div class="border-b bg-slate-50 px-6 py-3 flex items-start justify-between gap-4 flex-shrink-0">
+                        <div class="min-w-0 flex-1 space-y-2 text-xs">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="font-bold text-gray-500 mr-1">Run Override</span>
+                                <label class="flex items-center gap-1 px-2 py-1 border rounded cursor-pointer"
+                                    :class="aggRangeMode === 'plan' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white hover:bg-gray-50'"
+                                    title="Run with the saved plan time_window_sec and time_field. No runtime override is sent.">
+                                    <input type="radio" value="plan" v-model="aggRangeMode" class="accent-indigo-600">
+                                    Plan Default
+                                </label>
+                                <label class="flex items-center gap-1 px-2 py-1 border rounded cursor-pointer"
+                                    :class="aggRangeMode === 'auto' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white hover:bg-gray-50'"
+                                    title="Override this run with the latest data range: end=max timestamp, start=end-window.">
+                                    <input type="radio" value="auto" v-model="aggRangeMode" class="accent-indigo-600">
+                                    Auto Range
+                                </label>
+                                <label class="flex items-center gap-1 px-2 py-1 border rounded cursor-pointer"
+                                    :class="aggRangeMode === 'manual' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white hover:bg-gray-50'"
+                                    title="Override this run with an exact local start and end time.">
+                                    <input type="radio" value="manual" v-model="aggRangeMode" class="accent-indigo-600">
+                                    Manual Range
+                                </label>
+                            </div>
+
+                            <div class="flex flex-wrap items-center gap-2">
+                                <template v-if="aggRangeMode === 'plan'">
+                                    <span class="px-2 py-1 border rounded bg-white text-gray-600">
+                                        No runtime time_range override
+                                    </span>
+                                </template>
+                                <template v-else>
+                                    <span class="text-gray-500 font-medium">Window</span>
+                                    <select v-model="aggPreset" @change="aggRangeMode === 'manual' && applyPresetToManual()"
+                                        title="Window length used by Auto Range, and by Apply Window in Manual Range."
+                                        class="p-2 border rounded bg-white">
+                                        <option value="3600">Last 1h</option>
+                                        <option value="21600">Last 6h</option>
+                                        <option value="43200">Last 12h</option>
+                                        <option value="86400">Last 24h</option>
+                                        <option value="604800">Last 7d</option>
+                                        <option value="custom">Custom seconds</option>
+                                    </select>
+                                    <input v-if="aggPreset === 'custom'"
+                                        v-model.number="aggPresetCustomSec" type="number" min="60" step="60"
+                                        title="Custom window length in seconds. Minimum: 60."
+                                        placeholder="seconds"
+                                        class="w-28 p-2 border rounded bg-white font-mono" />
+
+                                    <template v-if="aggRangeMode === 'manual'">
+                                        <span class="text-gray-500 font-medium ml-2">Start</span>
+                                        <input type="datetime-local" v-model="aggManualStartLocal"
+                                            title="Start time in your browser's local timezone."
+                                            class="p-2 border rounded bg-white" />
+                                        <span class="text-gray-500 font-medium">End</span>
+                                        <input type="datetime-local" v-model="aggManualEndLocal"
+                                            title="End time in your browser's local timezone. Must be later than Start."
+                                            class="p-2 border rounded bg-white" />
+                                        <button @click="fillManualEndNow()"
+                                            title="Set End to now. If Start is empty, Start becomes End minus Window."
+                                            class="px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                            End = Now
+                                        </button>
+                                        <button @click="applyPresetToManual()"
+                                            title="Set Start to End minus the selected Window."
+                                            class="px-2 py-1 bg-white border rounded hover:bg-gray-100">
+                                            Apply Window
+                                        </button>
+                                    </template>
+
+                                    <span class="text-gray-500 font-medium ml-2">time_field</span>
+                                    <select v-model="selectedTimeFieldOption"
+                                        title="Metadata timestamp field used for the runtime time_range filter."
+                                        class="p-2 border rounded bg-white font-mono">
+                                        <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">{{ f.key }}</option>
+                                        <option value="__custom__">Custom...</option>
+                                    </select>
+                                    <input v-if="selectedTimeFieldOption === '__custom__'" v-model="aggregationTimeField"
+                                        title="Custom metadata key containing epoch timestamp values."
+                                        class="w-56 p-2 border rounded bg-white font-mono"
+                                        placeholder="e.g. timestamp, pub_timestamp" />
+                                </template>
+                            </div>
+
+                            <div class="text-[11px] text-gray-500 font-mono truncate" :title="aggScopeHint">
+                                {{ aggScopeHint }}
+                            </div>
                         </div>
 
                         <div class="text-xs flex items-center gap-3">
@@ -662,10 +707,25 @@
 
                                 <div v-else-if="aggViewTab==='visual'" class="h-full min-h-[560px] bg-slate-50 border rounded relative overflow-hidden">
                                     <div ref="aggChartContainer" class="w-full h-full min-h-[560px]"></div>
-                                    <div v-if="!offlineLatest || !(offlineLatest.points || []).length"
+                                    <div v-if="!offlineLatest || !offlineLatest.version"
                                         class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 bg-slate-50">
                                         <i class="fa-solid fa-chart-simple text-4xl mb-3 text-gray-300"></i>
-                                        <p>No visualization points. Run aggregation first.</p>
+                                        <p>No offline result. Run aggregation first.</p>
+                                    </div>
+                                    <div v-else-if="!offlineVisualizationPoints.length"
+                                        class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 bg-slate-50 px-6 text-center">
+                                        <i class="fa-solid fa-chart-simple text-4xl mb-3 text-gray-300"></i>
+                                        <p>No drawable points in latest offline result.</p>
+                                        <p class="text-xs mt-2 font-mono">
+                                            version={{ offlineLatest.version }},
+                                            n_points={{ offlineLatest.n_points || 0 }},
+                                            points={{ (offlineLatest.points || []).length }},
+                                            clusters={{ offlineClustersList.length }}
+                                        </p>
+                                    </div>
+                                    <div v-else-if="offlineVisualizationIsFallback"
+                                        class="absolute top-3 left-3 max-w-[420px] text-[11px] px-3 py-2 rounded border bg-white/95 text-gray-600 shadow-sm">
+                                        Fallback layout: latest has no saved x/y points, so positions are generated from cluster membership.
                                     </div>
                                 </div>
 
@@ -1305,6 +1365,8 @@
                                 <div class="col-span-3">
                                     <label class="block text-xs font-bold text-gray-500 mb-1">window(h)</label>
                                     <input v-model.number="planForm.window_h" type="number" min="1"
+                                        title="Saved default aggregation window in hours. Used when Run Override is Plan Default."
+                                        placeholder="24"
                                         class="w-full p-2 border rounded text-xs text-center" />
                                 </div>
                                 <div class="col-span-3">
@@ -1318,6 +1380,7 @@
                                 <div class="col-span-6">
                                     <label class="block text-xs font-bold text-gray-500 mb-1">time_field</label>
                                     <select v-model="planForm.time_field"
+                                        title="Saved default metadata timestamp field for this plan."
                                         class="w-full p-2 border rounded text-xs bg-white">
                                         <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">{{ f.key }}
                                         </option>
@@ -1328,7 +1391,8 @@
                                     <label class="block text-xs font-bold text-gray-500 mb-1">custom_time_field</label>
                                     <input v-model="planForm.custom_time_field"
                                         :disabled="planForm.time_field !== '__custom__'"
-                                        placeholder="e.g. pub_timestamp"
+                                        title="Custom metadata key containing epoch timestamp values."
+                                        placeholder="e.g. timestamp, pub_timestamp"
                                         class="w-full p-2 border rounded text-xs font-mono bg-white disabled:bg-gray-100" />
                                 </div>
                             </div>
@@ -1752,6 +1816,22 @@
                   return `${y}-${mo}-${d}T${h}:${mi}`;
                 };
 
+                const formatEpochForHint = (sec) => {
+                  if (!sec) return 'N/A';
+                  const dt = new Date(Number(sec) * 1000);
+                  if (Number.isNaN(dt.getTime())) return 'N/A';
+                  return `${dt.toLocaleString()} (${Math.floor(Number(sec))})`;
+                };
+
+                const formatWindowSeconds = (sec) => {
+                  const n = Math.max(0, Number(sec || 0));
+                  if (!n) return 'N/A';
+                  if (n % 604800 === 0) return `${n / 604800}d`;
+                  if (n % 3600 === 0) return `${n / 3600}h`;
+                  if (n % 60 === 0) return `${n / 60}m`;
+                  return `${n}s`;
+                };
+
                 const getPresetSeconds = () => {
                   if (aggPreset.value === 'custom') return Math.max(60, Number(aggPresetCustomSec.value || 0));
                   return Number(aggPreset.value || 86400);
@@ -1939,6 +2019,62 @@
                     return list.find(x => x.cluster_id === id) || null;
                 });
 
+                const offlineVisualizationPoints = computed(() => {
+                    const r = offlineLatest.value;
+                    const saved = (r && Array.isArray(r.points)) ? r.points : [];
+                    if (saved.length) return saved;
+
+                    const clusters = offlineClustersList.value;
+                    if (!clusters.length) return [];
+
+                    const out = [];
+                    const centerRadius = Math.max(8, clusters.length * 1.8);
+                    clusters.forEach((c, clusterIndex) => {
+                        const members = Array.isArray(c.members) ? c.members : [];
+                        const angle = (Math.PI * 2 * clusterIndex) / Math.max(1, clusters.length);
+                        const cx = Math.cos(angle) * centerRadius;
+                        const cy = Math.sin(angle) * centerRadius;
+                        const localRadius = Math.max(0.7, Math.sqrt(Math.max(1, members.length)) * 0.25);
+                        members.forEach((docId, memberIndex) => {
+                            const a = memberIndex * 2.399963229728653;
+                            const rr = localRadius * Math.sqrt((memberIndex + 1) / Math.max(1, members.length));
+                            out.push({
+                                doc_id: docId,
+                                cluster: c.cluster_id,
+                                label: c.cluster_id,
+                                x: Number((cx + Math.cos(a) * rr).toFixed(6)),
+                                y: Number((cy + Math.sin(a) * rr).toFixed(6)),
+                                preview: memberIndex === 0 ? (c.repr_preview || '') : '',
+                                last_seen: null,
+                                fallback_layout: true
+                            });
+                        });
+                    });
+
+                    const noiseMembers = (r && r.noise && Array.isArray(r.noise.members)) ? r.noise.members : [];
+                    noiseMembers.forEach((docId, i) => {
+                        const a = i * 2.399963229728653;
+                        const rr = centerRadius * 0.35 * Math.sqrt((i + 1) / Math.max(1, noiseMembers.length));
+                        out.push({
+                            doc_id: docId,
+                            cluster: 'noise',
+                            label: -1,
+                            x: Number((Math.cos(a) * rr).toFixed(6)),
+                            y: Number((Math.sin(a) * rr).toFixed(6)),
+                            preview: '',
+                            last_seen: null,
+                            fallback_layout: true
+                        });
+                    });
+
+                    return out;
+                });
+
+                const offlineVisualizationIsFallback = computed(() => {
+                    const saved = (offlineLatest.value && Array.isArray(offlineLatest.value.points)) ? offlineLatest.value.points : [];
+                    return !saved.length && offlineVisualizationPoints.value.length > 0;
+                });
+
                 const onlineClustersList = computed(() => {
                     const st = onlineState.value;
                     if (!st || !st.clusters) return [];
@@ -1961,6 +2097,28 @@
 
                 const onlineClustersCount = computed(() => (onlineState.value && onlineState.value.clusters) ? Object.keys(onlineState.value.clusters).length : 0);
                 const onlineDocCount = computed(() => (onlineState.value && onlineState.value.doc_to_cluster) ? Object.keys(onlineState.value.doc_to_cluster).length : 0);
+                const aggScopeHint = computed(() => {
+                    const plan = selectedPlan.value;
+                    if (aggRangeMode.value === 'plan') {
+                        const win = formatWindowSeconds(plan?.time_window_sec || 24 * 3600);
+                        const tf = plan?.time_field || 'timestamp';
+                        return `Plan Default: submit no time_range override. Backend uses plan window=${win}, time_field=${tf}.`;
+                    }
+                    if (aggRangeMode.value === 'auto') {
+                        const win = formatWindowSeconds(getPresetSeconds());
+                        const tf = aggregationTimeField.value || 'timestamp';
+                        const start = aggTimeRange.value.start;
+                        const end = aggTimeRange.value.end;
+                        const preview = (start && end)
+                            ? ` Last computed range: ${formatEpochForHint(start)} -> ${formatEpochForHint(end)}.`
+                            : '';
+                        return `Auto Range: submit runtime override time_range using latest ${win} by ${tf}.${preview}`;
+                    }
+                    const start = aggTimeRange.value.start;
+                    const end = aggTimeRange.value.end;
+                    const validity = (start && end && start < end) ? 'valid' : 'set Start < End';
+                    return `Manual Range: submit runtime override time_range=${formatEpochForHint(start)} -> ${formatEpochForHint(end)}; ${validity}.`;
+                });
 
                 // --- Helpers ---
                 const showToast = (msg, type = 'success') => {
@@ -2219,7 +2377,7 @@
                     if (!aggChartContainer.value) return;
                     if (aggChartInstance) aggChartInstance.dispose();
 
-                    const points = (offlineLatest.value && offlineLatest.value.points) ? offlineLatest.value.points : [];
+                    const points = offlineVisualizationPoints.value || [];
                     aggChartInstance = echarts.init(aggChartContainer.value);
 
                     const dataWithStyle = points.map(p => {
@@ -2863,6 +3021,15 @@
                   if (aggRangeMode.value === 'manual') updateAggTimeRangeFromManual();
                 });
 
+                watch(aggRangeMode, (mode) => {
+                    if (mode === 'manual' && (!aggManualStartLocal.value || !aggManualEndLocal.value)) {
+                        applyPresetToManual();
+                    }
+                    if (mode === 'plan') {
+                        aggTimeRange.value = { start: null, end: null };
+                    }
+                });
+
                 watch(() => planForm.value.method, (method) => {
                     planForm.value.params = defaultPlanParams(method);
                 });
@@ -2883,6 +3050,7 @@
                     initAggregationTab, refreshAggregationPlans, selectPlan, aggViewTab,
 
                     offlineLatest, offlineClustersList, filteredOfflineClusters,
+                    offlineVisualizationPoints, offlineVisualizationIsFallback,
                     offlineClusterFilter, selectedOfflineClusterId, selectedOfflineCluster, selectOfflineCluster,
                     aggChartContainer, aggActiveCluster, showAggregationVisual,
                     renderAggregationChart, focusAggregationCluster, resetAggregationVisualFocus,
@@ -2890,7 +3058,7 @@
                     onlineState, onlineClustersCount, onlineDocCount,
                     onlineClusterFilter, filteredOnlineClusters,
 
-                    aggTimeRange, aggregationTimeField, aggJob, aggRefreshLoading,
+                    aggTimeRange, aggregationTimeField, aggScopeHint, aggJob, aggRefreshLoading,
                     runAggregationWithScope, refreshSelectedPlanViews,
                     loadOfflineLatest, loadOnlineState,
 
