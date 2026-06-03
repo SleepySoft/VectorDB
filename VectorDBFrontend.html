@@ -607,16 +607,27 @@
                         </div>
                     </div>
 
-                    <div class="flex-1 min-h-0 grid grid-cols-[280px_minmax(0,1fr)_360px] gap-4 p-4 overflow-hidden">
+                    <div class="flex-1 min-h-0 grid gap-4 p-4 overflow-hidden transition-all"
+                        :style="{ gridTemplateColumns: aggregationGridTemplate }">
                         <aside class="bg-white border rounded-lg overflow-hidden flex flex-col min-h-0">
-                            <div class="p-3 border-b bg-gray-50 flex items-center justify-between">
-                                <div class="font-bold text-gray-700 text-sm">Plans</div>
-                                <button :disabled="!selectedCollection" @click="openPlanModalForCreateOrEdit()"
+                            <div class="border-b bg-gray-50 flex items-center justify-between"
+                                :class="aggPlansCollapsed ? 'p-2' : 'p-3'">
+                                <div v-if="!aggPlansCollapsed" class="font-bold text-gray-700 text-sm">Plans</div>
+                                <button @click="toggleAggregationPlansPanel()"
+                                    :title="aggPlansCollapsed ? 'Expand plans' : 'Collapse plans'"
+                                    class="text-xs w-7 h-7 bg-white border rounded hover:bg-gray-100">
+                                    <i :class="aggPlansCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'"></i>
+                                </button>
+                                <button v-if="!aggPlansCollapsed" :disabled="!selectedCollection" @click="openPlanModalForCreateOrEdit()"
                                     class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100 disabled:opacity-50">
                                     <i class="fa-solid fa-plus mr-1 text-gray-400"></i>Plan
                                 </button>
                             </div>
-                            <div class="flex-1 overflow-y-auto scroller p-2 space-y-2">
+                            <div v-if="aggPlansCollapsed"
+                                class="flex-1 flex items-center justify-center text-gray-400 text-xs [writing-mode:vertical-rl]">
+                                Plans
+                            </div>
+                            <div v-else class="flex-1 overflow-y-auto scroller p-2 space-y-2">
                                 <div v-if="aggregationFilteredPlans.length === 0" class="p-4 text-sm text-gray-400 italic">
                                     No plan for this collection.
                                 </div>
@@ -765,11 +776,22 @@
                         </main>
 
                         <aside class="bg-white border rounded-lg overflow-hidden flex flex-col min-h-0">
-                            <div class="p-3 border-b bg-gray-50 flex items-center justify-between">
-                                <div class="font-bold text-gray-700 text-sm">Cluster Detail</div>
-                                <button v-if="selectedOfflineClusterId" @click="resetAggregationVisualFocus"
+                            <div class="border-b bg-gray-50 flex items-center justify-between"
+                                :class="aggDetailsCollapsed ? 'p-2' : 'p-3'">
+                                <button @click="toggleAggregationDetailsPanel()"
+                                    :title="aggDetailsCollapsed ? 'Expand detail' : 'Collapse detail'"
+                                    class="text-xs w-7 h-7 bg-white border rounded hover:bg-gray-100">
+                                    <i :class="aggDetailsCollapsed ? 'fa-solid fa-chevron-left' : 'fa-solid fa-chevron-right'"></i>
+                                </button>
+                                <div v-if="!aggDetailsCollapsed" class="font-bold text-gray-700 text-sm">Cluster Detail</div>
+                                <button v-if="!aggDetailsCollapsed && selectedOfflineClusterId" @click="resetAggregationVisualFocus"
                                     class="text-xs px-2 py-1 bg-white border rounded hover:bg-gray-100">Clear</button>
                             </div>
+                            <div v-if="aggDetailsCollapsed"
+                                class="flex-1 flex items-center justify-center text-gray-400 text-xs [writing-mode:vertical-rl]">
+                                Detail
+                            </div>
+                            <template v-else>
                             <div class="p-3 border-b">
                                 <div v-if="!selectedOfflineClusterId" class="text-sm text-gray-400 italic">Select a cluster from the list or map.</div>
                                 <div v-else>
@@ -791,6 +813,7 @@
                                     <div class="text-xs text-gray-600 mt-2 line-clamp-3">{{ it.preview }}</div>
                                 </div>
                             </div>
+                            </template>
                         </aside>
                     </div>
                 </div>
@@ -1893,6 +1916,8 @@
                 const aggJob = ref({ status: 'idle', jobId: null, error: null });
                 const aggRefreshLoading = ref(false);
                 const aggViewTab = ref('summary'); // summary | clusters | visual | online
+                const aggPlansCollapsed = ref(false);
+                const aggDetailsCollapsed = ref(false);
 
                 const offlineClusterFilter = ref('');
                 const selectedOfflineClusterId = ref('');
@@ -2097,6 +2122,11 @@
 
                 const onlineClustersCount = computed(() => (onlineState.value && onlineState.value.clusters) ? Object.keys(onlineState.value.clusters).length : 0);
                 const onlineDocCount = computed(() => (onlineState.value && onlineState.value.doc_to_cluster) ? Object.keys(onlineState.value.doc_to_cluster).length : 0);
+                const aggregationGridTemplate = computed(() => {
+                    const plans = aggPlansCollapsed.value ? '44px' : '280px';
+                    const details = aggDetailsCollapsed.value ? '44px' : '360px';
+                    return `${plans} minmax(0, 1fr) ${details}`;
+                });
                 const aggScopeHint = computed(() => {
                     const plan = selectedPlan.value;
                     if (aggRangeMode.value === 'plan') {
@@ -2371,6 +2401,22 @@
                 const showAggregationVisual = () => {
                     aggViewTab.value = 'visual';
                     nextTick(() => renderAggregationChart());
+                };
+
+                const resizeAggregationChart = () => {
+                    nextTick(() => {
+                        if (aggChartInstance) aggChartInstance.resize();
+                    });
+                };
+
+                const toggleAggregationPlansPanel = () => {
+                    aggPlansCollapsed.value = !aggPlansCollapsed.value;
+                    resizeAggregationChart();
+                };
+
+                const toggleAggregationDetailsPanel = () => {
+                    aggDetailsCollapsed.value = !aggDetailsCollapsed.value;
+                    resizeAggregationChart();
                 };
 
                 const renderAggregationChart = () => {
@@ -3047,6 +3093,7 @@
 
                     // Aggregation exports
                     aggregationPlans, aggregationFilteredPlans, selectedPlan, selectedPlanId,
+                    aggPlansCollapsed, aggDetailsCollapsed, aggregationGridTemplate,
                     initAggregationTab, refreshAggregationPlans, selectPlan, aggViewTab,
 
                     offlineLatest, offlineClustersList, filteredOfflineClusters,
@@ -3054,6 +3101,7 @@
                     offlineClusterFilter, selectedOfflineClusterId, selectedOfflineCluster, selectOfflineCluster,
                     aggChartContainer, aggActiveCluster, showAggregationVisual,
                     renderAggregationChart, focusAggregationCluster, resetAggregationVisualFocus,
+                    toggleAggregationPlansPanel, toggleAggregationDetailsPanel,
 
                     onlineState, onlineClustersCount, onlineDocCount,
                     onlineClusterFilter, filteredOnlineClusters,
