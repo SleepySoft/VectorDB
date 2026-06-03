@@ -500,21 +500,25 @@
                                 class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm disabled:opacity-50">
                                 <i class="fa-solid fa-rotate mr-2 text-gray-400" :class="aggRefreshLoading ? 'fa-spin' : ''"></i>Refresh
                             </button>
-                            <button @click="autoPickTimeRangeAndRun()"
+                            <button @click="runAggregationWithScope()"
                                 :disabled="!selectedPlanId || aggJob.status==='processing'"
                                 class="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm disabled:opacity-50">
                                 <i v-if="aggJob.status==='processing'" class="fa-solid fa-spinner fa-spin mr-2"></i>
-                                {{ aggJob.status==='processing' ? 'Running' : 'Run Aggregation' }}
+                                {{ aggJob.status==='processing' ? 'Running' : 'Run With Scope' }}
                             </button>
                         </div>
                     </div>
 
                     <div class="border-b bg-slate-50 px-6 py-3 flex items-center justify-between flex-shrink-0">
                         <div class="flex flex-wrap items-center gap-3 text-xs">
-                            <span class="font-bold text-gray-500">Scope</span>
+                            <span class="font-bold text-gray-500">Run Override</span>
+                            <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
+                                <input type="radio" value="plan" v-model="aggRangeMode" class="accent-indigo-600">
+                                Plan Default
+                            </label>
                             <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
                                 <input type="radio" value="auto" v-model="aggRangeMode" class="accent-indigo-600">
-                                Latest Window
+                                Auto Range
                             </label>
                             <label class="flex items-center gap-1 px-2 py-1 border rounded bg-white cursor-pointer">
                                 <input type="radio" value="manual" v-model="aggRangeMode" class="accent-indigo-600">
@@ -536,12 +540,15 @@
                                 class="p-2 border rounded bg-white" />
                             <input v-if="aggRangeMode === 'manual'" type="datetime-local" v-model="aggManualEndLocal"
                                 class="p-2 border rounded bg-white" />
-                            <select v-model="selectedTimeFieldOption"
+                            <span v-if="aggRangeMode === 'plan'" class="text-gray-400">
+                                no override; uses saved plan window and time_field
+                            </span>
+                            <select v-if="aggRangeMode !== 'plan'" v-model="selectedTimeFieldOption"
                                 class="p-2 border rounded bg-white font-mono">
                                 <option v-for="f in timeFieldCandidates" :key="f.key" :value="f.key">{{ f.key }}</option>
                                 <option value="__custom__">Custom...</option>
                             </select>
-                            <input v-if="selectedTimeFieldOption === '__custom__'" v-model="aggregationTimeField"
+                            <input v-if="aggRangeMode !== 'plan' && selectedTimeFieldOption === '__custom__'" v-model="aggregationTimeField"
                                 class="p-2 border rounded bg-white font-mono" placeholder="time_field" />
                         </div>
 
@@ -930,12 +937,12 @@
                                         </div>
 
                                         <div class="flex items-center gap-2 flex-shrink-0">
-                                            <button @click="autoPickTimeRangeAndRun()"
+                                            <button @click="runAggregationWithScope()"
                                                 :disabled="aggJob.status==='processing'"
                                                 class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm disabled:opacity-50">
                                                 <i v-if="aggJob.status==='processing'"
                                                     class="fa-solid fa-spinner fa-spin mr-2"></i>
-                                                {{ aggJob.status==='processing' ? 'RUNNING...' : 'Auto Window & Run' }}
+                                                {{ aggJob.status==='processing' ? 'RUNNING...' : 'Run With Scope' }}
                                             </button>
                                             <button @click="refreshSelectedPlanViews()"
                                                 class="px-3 py-2 bg-white border rounded hover:bg-gray-100 text-sm">
@@ -1789,7 +1796,7 @@
                 const aggregationTimeField = ref('timestamp');
 
                 // --- time range controls ---
-                const aggRangeMode = ref('auto'); // 'auto' | 'manual'
+                const aggRangeMode = ref('auto'); // 'plan' | 'auto' | 'manual'
 
                 // preset window seconds (default 24h)
                 const aggPreset = ref('86400');   // string because <select>
@@ -2296,21 +2303,25 @@
                     if (clusterId && clusterId !== 'noise') await loadOfflineClusterItems(clusterId);
                 };
 
-                const autoPickTimeRangeAndRun = async () => {
+                const runAggregationWithScope = async () => {
                   if (!selectedPlanId.value || !selectedCollection.value) return;
 
                   aggJob.value = { status: 'processing', jobId: null, error: null };
 
                   try {
-                    // 0) 找到 plan，拿默认窗口秒数（auto 用）
+                    // 0) 找到 plan，拿默认窗口秒数（auto fallback 用）
                     const plan = (aggregationPlans.value || []).find(p => p.plan_id === selectedPlanId.value);
-                    const windowSec = plan ? (plan.time_window_sec || 24 * 3600) : (24 * 3600);
+                    const windowSec = getPresetSeconds() || (plan ? (plan.time_window_sec || 24 * 3600) : (24 * 3600));
 
                     let start = null;
                     let end = null;
+                    const runPayload = {};
 
                     // 1) 根据模式决定 start/end
-                    if (aggRangeMode.value === 'manual') {
+                    if (aggRangeMode.value === 'plan') {
+                      // 不传 time_range / time_field override；后端使用 plan 默认配置。
+                      aggTimeRange.value = { start: null, end: null };
+                    } else if (aggRangeMode.value === 'manual') {
                       // 手动：直接用 UI 里维护的 epoch
                       start = aggTimeRange.value.start;
                       end = aggTimeRange.value.end;
@@ -2318,8 +2329,10 @@
                       if (!start || !end || start >= end) {
                         throw new Error('Invalid manual time range. Please set Start < End.');
                       }
+                      runPayload.time_range = [start, end];
+                      runPayload.overrides = { time_field: aggregationTimeField.value };
                     } else {
-                      // 自动：从 timestamp_stats 拿 max_ts，当作 end；start = end - windowSec
+                      // 自动 override：从 timestamp_stats 拿 max_ts，当作 end；start = end - preset
                       const tsRes = await fetch(
                         `api/collections/${encodeURIComponent(selectedCollection.value)}/timestamp_stats?time_field=${encodeURIComponent(aggregationTimeField.value)}&scan_limit=20000`
                       );
@@ -2331,14 +2344,11 @@
 
                       // 写回 UI 显示
                       aggTimeRange.value = { start, end };
+                      runPayload.time_range = [start, end];
+                      runPayload.overrides = { time_field: aggregationTimeField.value };
                     }
 
                     // 2) Run
-                    const runPayload = {
-                      time_range: [start, end],
-                      overrides: { time_field: aggregationTimeField.value }
-                    };
-
                     const runRes = await fetch(`api/aggregation/plans/${encodeURIComponent(selectedPlanId.value)}/run`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
@@ -2881,7 +2891,7 @@
                     onlineClusterFilter, filteredOnlineClusters,
 
                     aggTimeRange, aggregationTimeField, aggJob, aggRefreshLoading,
-                    autoPickTimeRangeAndRun, refreshSelectedPlanViews,
+                    runAggregationWithScope, refreshSelectedPlanViews,
                     loadOfflineLatest, loadOnlineState,
 
                     showPlanModal, planForm,
