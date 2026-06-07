@@ -1054,9 +1054,20 @@ class VectorDBService:
                 # offline runner can read overrides["time_range"] from job metadata if you implement it that way.
                 # For now, we store it in overrides and pass to run_offline.
                 resp = self.cluster_mgr.run_offline(plan_id, async_run=True, overrides=overrides)
-                job_id = resp["job_id"]
+
+                # 做防御性判断，兼容字符串和字典的返回格式
+                if isinstance(resp, str):
+                    job_id = resp
+                elif isinstance(resp, dict):
+                    job_id = resp.get("job_id", str(resp))
+                else:
+                    # 如果返回的是一个对象，尝试取其属性
+                    job_id = getattr(resp, "job_id", str(resp))
+
                 return jsonify({"status": "accepted", "job_id": job_id}), 202
             except Exception as e:
+                # 把完整的堆栈打出来，千万别静默报错！
+                logger.error(f"Error triggering offline run for {plan_id}: {str(e)}", exc_info=True)
                 return jsonify({"error": str(e)}), 500
 
         @route("/api/aggregation/jobs/<job_id>", methods=["GET"])

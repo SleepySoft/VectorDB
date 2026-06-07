@@ -495,6 +495,11 @@ class RemoteCollection:
                 msg = resp.text
             raise ServiceNotConfiguredError(f"Service feature not configured: {msg}")
 
+        # 拦截 500 级别错误，把服务端的报错本体 (resp.text) 打印出来
+        if resp.status_code >= 500 and resp.status_code not in (501, 503):
+            error_body = resp.text
+            raise NonRetryableError(f"Server Internal Error ({resp.status_code}): {error_body}")
+
         # Auth & request validation
         if resp.status_code == 401:
             raise AuthenticationError("Authentication failed")
