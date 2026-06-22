@@ -15,6 +15,10 @@ from chromadb import Settings
 from typing import List, Dict, Any, Optional, Union, Tuple
 
 from VectorDB.ClusterAnalysisPipeline import IntelligenceAnalysisPipeline, AnalysisConfig
+try:
+    from VectorDB.perf_logger import get_vector_performance_logger
+except ImportError:
+    from perf_logger import get_vector_performance_logger
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +75,8 @@ class VectorStorageEngine:
         self._pending = {}  # {collection_name: set(doc_id)}
         self._failed = {}   # {collection_name: {doc_id: "err"}}
         self._pending_lock = threading.RLock()
+
+        self.perf_logger = get_vector_performance_logger()
 
         # --- Event Bus (Upsert listeners) ---
         # listeners will receive dict events, must be fast/non-blocking
@@ -222,18 +228,26 @@ class VectorStorageEngine:
         doc_id = task["doc_id"]
         text = task["text"]
         metadata = task["metadata"]
+        text_len = len(text) if isinstance(text, str) else 0
 
         # Ensure repo exists (thread-safe)
         repo = self.ensure_repository(collection_name)
 
         try:
-            # Perform the heavy lifting (pass optional embeddings hook)
-            repo.upsert_document(
+            with self.perf_logger.timed(
+                "vectordb_upsert_task",
+                collection=collection_name,
                 doc_id=doc_id,
-                text=text,
-                metadata=metadata,
-                on_embeddings=self._repo_embeddings_hook
-            )
+                text_len=text_len,
+                queue_size=self._queue.qsize(),
+            ):
+                # Perform the heavy lifting (pass optional embeddings hook)
+                repo.upsert_document(
+                    doc_id=doc_id,
+                    text=text,
+                    metadata=metadata,
+                    on_embeddings=self._repo_embeddings_hook
+                )
 
             # On success -> remove from pending
             with self._pending_lock:
@@ -790,11 +804,14 @@ class VectorCollectionRepo:
             List[Dict]: List of result objects containing doc_id, score, text, metadata.
         """
 
+        # 防止超大 top_n 导致内存与 Chroma 查询开销失控
+        top_n = max(1, min(int(top_n), 100))
+
         # Ensure _vectorize receives List[str], and we extract the first vector
         query_vector = self._vectorize([query_text])[0].tolist()
 
         # Request more chunks than top_n because multiple chunks might come from same doc
-        fetch_k = top_n * 3
+        fetch_k = min(top_n * 3, 300)
 
         try:
             results = self._collection.query(

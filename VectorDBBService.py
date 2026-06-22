@@ -14,6 +14,11 @@ from typing import Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, request, jsonify, send_file, Response
 
+try:
+    from VectorDB.perf_logger import setup_vector_perf_logging, get_vector_performance_logger
+except ImportError:
+    from perf_logger import setup_vector_perf_logging, get_vector_performance_logger
+
 from VectorDB.aggregation.plans import AggregationPlan
 from VectorDB.aggregation.registry import AggregationRegistry
 from VectorDB.aggregation.cluster_manager import ClusterManager
@@ -235,10 +240,23 @@ class VectorDBService:
         self._analysis_jobs: Dict[str, Dict[str, Any]] = {}
         self._aggregation_jobs: Dict[str, Dict[str, Any]] = {}
         self._job_manager = AsyncJobManager(
-            max_workers=4,
+            max_workers=int(os.getenv("VECTOR_JOB_MAX_WORKERS", "8")),
             ttl_sec=int(os.getenv("VECTOR_JOB_TTL_SEC", "3600"))
         )
         self._analysis_result_ttl_sec = int(os.getenv("VECTOR_ANALYSIS_RESULT_TTL_SEC", "600"))
+
+        # 搜索并发控制：防止外部搜索请求占满所有计算资源
+        self._max_concurrent_searches = int(os.getenv("VECTOR_MAX_CONCURRENT_SEARCHES", "8"))
+        self._search_semaphore = threading.Semaphore(self._max_concurrent_searches)
+        self._search_metrics_lock = threading.Lock()
+        self._search_metrics = {
+            "active": 0,
+            "queued": 0,
+            "total": 0,
+            "rejected": 0,
+        }
+
+        self.perf_logger = get_vector_performance_logger()
 
         self.metrics = {
             'service_unavailable_count': 0,
@@ -249,6 +267,24 @@ class VectorDBService:
 
         if not os.path.exists(self._frontend_path):
             logger.warning(f"Frontend file not found at: {self._frontend_path}")
+
+    def _acquire_search_slot(self, timeout: float = 0.0) -> bool:
+        """尝试获取一个搜索并发槽位。0 表示不等待。"""
+        return self._search_semaphore.acquire(blocking=(timeout > 0), timeout=timeout if timeout > 0 else None)
+
+    def _release_search_slot(self):
+        self._search_semaphore.release()
+
+    def _update_search_metrics(self, active_delta: int = 0, queued_delta: int = 0, total_delta: int = 0, rejected_delta: int = 0):
+        with self._search_metrics_lock:
+            self._search_metrics["active"] = max(0, self._search_metrics["active"] + active_delta)
+            self._search_metrics["queued"] = max(0, self._search_metrics["queued"] + queued_delta)
+            self._search_metrics["total"] = max(0, self._search_metrics["total"] + total_delta)
+            self._search_metrics["rejected"] = max(0, self._search_metrics["rejected"] + rejected_delta)
+
+    def _get_search_metrics(self) -> Dict[str, Any]:
+        with self._search_metrics_lock:
+            return dict(self._search_metrics)
 
     def create_blueprint(self, wrapper: Optional[Callable] = None) -> Blueprint:
         """
@@ -626,14 +662,23 @@ class VectorDBService:
             score_threshold = data.get("score_threshold", 0.0)
             filter_criteria = data.get("filter_criteria", None)
 
+            if not self._acquire_search_slot(timeout=0):
+                self._update_search_metrics(rejected_delta=1)
+                raise ServiceUnavailable(ServiceUnavailable.Code.BUSY, "Too many concurrent searches")
+
             try:
-                repo = get_repo_strict(name)
-                results = repo.search(
-                    query_text=query,
+                with self.perf_logger.timed(
+                    "vectordb_sync_search",
+                    collection=name,
                     top_n=top_n,
-                    score_threshold=score_threshold,
-                    filter_criteria=filter_criteria
-                )
+                ):
+                    repo = get_repo_strict(name)
+                    results = repo.search(
+                        query_text=query,
+                        top_n=top_n,
+                        score_threshold=score_threshold,
+                        filter_criteria=filter_criteria
+                    )
                 return jsonify(results)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
@@ -642,6 +687,8 @@ class VectorDBService:
             except Exception as e:
                 logger.error(f"Search failed: {e}")
                 return jsonify({"error": str(e)}), 500
+            finally:
+                self._release_search_slot()
 
         @route("/api/collections/<name>/search-jobs", methods=["POST"])
         def submit_search_job(name):
@@ -657,21 +704,41 @@ class VectorDBService:
                 score_threshold = float(data.get("score_threshold", 0.0))
                 filter_criteria = data.get("filter_criteria", None)
 
-                def run_search():
-                    repo = get_repo_strict(name)
-                    return repo.search(
-                        query_text=query,
-                        top_n=top_n,
-                        score_threshold=score_threshold,
-                        filter_criteria=filter_criteria
-                    )
+                if not self._acquire_search_slot(timeout=0):
+                    self._update_search_metrics(rejected_delta=1)
+                    raise ServiceUnavailable(ServiceUnavailable.Code.BUSY, "Too many concurrent searches")
 
-                job = self._job_manager.submit(
-                    "collection.search",
-                    run_search,
-                    metadata={"collection": name, "top_n": top_n}
-                )
-                return accepted_job_response(job)
+                def run_search():
+                    self._update_search_metrics(active_delta=1, queued_delta=-1, total_delta=1)
+                    try:
+                        with self.perf_logger.timed(
+                            "vectordb_async_search",
+                            collection=name,
+                            top_n=top_n,
+                        ):
+                            repo = get_repo_strict(name)
+                            return repo.search(
+                                query_text=query,
+                                top_n=top_n,
+                                score_threshold=score_threshold,
+                                filter_criteria=filter_criteria
+                            )
+                    finally:
+                        self._update_search_metrics(active_delta=-1)
+                        self._release_search_slot()
+
+                try:
+                    job = self._job_manager.submit(
+                        "collection.search",
+                        run_search,
+                        metadata={"collection": name, "top_n": top_n}
+                    )
+                    self._update_search_metrics(queued_delta=1)
+                    return accepted_job_response(job)
+                except Exception:
+                    # 提交失败时必须归还槽位
+                    self._release_search_slot()
+                    raise
             except ValueError as e:
                 return jsonify({"error": str(e)}), 404
             except ServiceUnavailable as e:
@@ -1321,6 +1388,8 @@ class VectorDBService:
                 "async": self._job_manager.get_stats(),
                 "analysis": self._get_analysis_job_stats(),
                 "aggregation": self._get_cluster_job_stats(),
+                "search": self._get_search_metrics(),
+                "search_max_concurrent": self._max_concurrent_searches,
             },
             "aggregation_store": self._get_aggregation_store_stats(),
         }
@@ -1547,6 +1616,9 @@ def main():
     print("=" * 50)
 
     # --- Initialization ---
+
+    # 0. Setup performance logging
+    setup_vector_perf_logging()
 
     # 1. Initialize Engine with Config
     os.makedirs(args.db_path, exist_ok=True)
