@@ -661,6 +661,8 @@ class VectorDBService:
             top_n = data.get("top_n", 5)
             score_threshold = data.get("score_threshold", 0.0)
             filter_criteria = data.get("filter_criteria", None)
+            force_db_filter = bool(data.get("force_db_filter", False))
+            post_filter_multiplier = int(data.get("post_filter_multiplier", 10))
 
             if not self._acquire_search_slot(timeout=0):
                 self._update_search_metrics(rejected_delta=1)
@@ -677,7 +679,9 @@ class VectorDBService:
                         query_text=query,
                         top_n=top_n,
                         score_threshold=score_threshold,
-                        filter_criteria=filter_criteria
+                        filter_criteria=filter_criteria,
+                        force_db_filter=force_db_filter,
+                        post_filter_multiplier=post_filter_multiplier,
                     )
                 return jsonify(results)
             except ValueError as e:
@@ -703,6 +707,8 @@ class VectorDBService:
                 top_n = int(data.get("top_n", 5))
                 score_threshold = float(data.get("score_threshold", 0.0))
                 filter_criteria = data.get("filter_criteria", None)
+                force_db_filter = bool(data.get("force_db_filter", False))
+                post_filter_multiplier = int(data.get("post_filter_multiplier", 10))
 
                 if not self._acquire_search_slot(timeout=0):
                     self._update_search_metrics(rejected_delta=1)
@@ -721,7 +727,9 @@ class VectorDBService:
                                 query_text=query,
                                 top_n=top_n,
                                 score_threshold=score_threshold,
-                                filter_criteria=filter_criteria
+                                filter_criteria=filter_criteria,
+                                force_db_filter=force_db_filter,
+                                post_filter_multiplier=post_filter_multiplier,
                             )
                     finally:
                         self._update_search_metrics(active_delta=-1)
@@ -1559,14 +1567,35 @@ class VectorDBService:
         return True
 
     def run_standalone(self, host="0.0.0.0", port=8001, debug=False):
-        """Run as a standalone Flask app."""
+        """Run as a standalone Flask app using Waitress in production."""
         app = Flask(__name__)
 
         # Mount at root for standalone usage
         self.mount_to_app(app, url_prefix="")
 
         print(f"Starting standalone VectorDB at http://{host}:{port}")
-        app.run(host=host, port=port, debug=debug)
+
+        # Prefer Waitress for production loads; fall back to Flask dev server
+        # only if Waitress is unavailable (e.g. development environments).
+        try:
+            import waitress
+            threads = int(os.getenv("VECTOR_WAITRESS_THREADS", "64"))
+            connection_limit = int(os.getenv("VECTOR_WAITRESS_CONNECTION_LIMIT", "256"))
+            channel_timeout = int(os.getenv("VECTOR_WAITRESS_CHANNEL_TIMEOUT", "60"))
+            print(f"Using Waitress (threads={threads}, connection_limit={connection_limit}, "
+                  f"channel_timeout={channel_timeout})")
+            waitress.serve(
+                app,
+                host=host,
+                port=port,
+                threads=threads,
+                connection_limit=connection_limit,
+                channel_timeout=channel_timeout,
+            )
+        except ImportError:
+            logger.warning("Waitress not installed, falling back to Flask development server. "
+                           "This is NOT recommended for production.")
+            app.run(host=host, port=port, debug=debug, threaded=True)
 
 
 # --- Usage Examples ---
@@ -1595,6 +1624,22 @@ def main():
                         default=os.getenv("VECTOR_DB_PATH", "./chroma_data"),
                         help="Path to save vector data (default: ./chroma_data or env VECTOR_DB_PATH)")
 
+    parser.add_argument("--hnsw-m", type=int,
+                        default=int(os.getenv("VECTOR_HNSW_M", "32")),
+                        help="HNSW M parameter (default: 32 or env VECTOR_HNSW_M)")
+
+    parser.add_argument("--hnsw-ef-construction", type=int,
+                        default=int(os.getenv("VECTOR_HNSW_EF_CONSTRUCTION", "200")),
+                        help="HNSW ef_construction parameter (default: 200 or env VECTOR_HNSW_EF_CONSTRUCTION)")
+
+    parser.add_argument("--hnsw-ef-search", type=int,
+                        default=int(os.getenv("VECTOR_HNSW_EF_SEARCH", "100")),
+                        help="HNSW ef_search parameter (default: 100 or env VECTOR_HNSW_EF_SEARCH)")
+
+    parser.add_argument("--hnsw-num-threads", type=int,
+                        default=int(os.getenv("VECTOR_HNSW_NUM_THREADS", "8")),
+                        help="HNSW num_threads parameter (default: 8 or env VECTOR_HNSW_NUM_THREADS)")
+
     # 3. Model Config
     parser.add_argument("--model", type=str,
                         default=os.getenv("VECTOR_MODEL", DEFAULT_MODEL),
@@ -1612,6 +1657,8 @@ def main():
     print(f" - Host:      {args.host}:{args.port}")
     print(f" - DB Path:   {args.db_path}")
     print(f" - Model:     {args.model}")
+    print(f" - HNSW:      M={args.hnsw_m}, ef_construction={args.hnsw_ef_construction}, "
+          f"ef_search={args.hnsw_ef_search}, num_threads={args.hnsw_num_threads}")
     print(f" - AggStore:  {args.agg_store_dir}")
     print("=" * 50)
 
@@ -1623,9 +1670,17 @@ def main():
     # 1. Initialize Engine with Config
     os.makedirs(args.db_path, exist_ok=True)
 
+    # ChromaDB 1.2.1 (Rust backend) only accepts a subset of hnsw:* keys when
+    # creating a collection. ef_search / ef_construction are set at query/build
+    # time through other APIs; here we only pass the keys that survive validation.
+    hnsw_config = {
+        "M": args.hnsw_m,
+        "num_threads": args.hnsw_num_threads,
+    }
     engine_instance = VectorStorageEngine(
         db_path=args.db_path,
-        model_name=args.model
+        model_name=args.model,
+        hnsw_config=hnsw_config
     )
 
     # 2. Aggregation Store (JSON persistence)

@@ -11,6 +11,7 @@ import logging
 import threading
 import numpy as np
 from enum import Enum
+from functools import lru_cache
 from chromadb import Settings
 from typing import List, Dict, Any, Optional, Union, Tuple
 
@@ -49,16 +50,20 @@ class VectorStorageEngine:
     per application lifecycle, but multiple instances are allowed (e.g., for different DB paths).
     """
 
-    def __init__(self, db_path: str, model_name: str, worker_enabled: bool = True):
+    def __init__(self, db_path: str, model_name: str, worker_enabled: bool = True,
+                 hnsw_config: Optional[Dict[str, Any]] = None):
         """
         Initializes the engine. This operation is blocking and heavy.
 
         Args:
             db_path (str): File system path for the persistent vector database.
             model_name (str): HuggingFace model name for embeddings.
+            hnsw_config (Dict[str, Any]): Optional HNSW tuning passed to every
+                VectorCollectionRepo. See VectorCollectionRepo.__init__ for details.
         """
         self._db_path = db_path
         self._model_name = model_name
+        self._hnsw_config = hnsw_config or {}
 
         self._status = VectorStorageEngine.Status.INIT
         self._error_message = None
@@ -420,7 +425,8 @@ class VectorStorageEngine:
                 collection_name=collection_name,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
-                db_path=self._db_path
+                db_path=self._db_path,
+                hnsw_config=self._hnsw_config
             )
             self._repos[collection_name] = repo
             return repo
@@ -579,9 +585,16 @@ class VectorCollectionRepo:
             chunk_size: int,
             chunk_overlap: int,
             db_path: str,
+            hnsw_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialized by VectorStorageEngine. Do not instantiate directly.
+
+        Args:
+            hnsw_config: Optional HNSW index tuning parameters, e.g.
+                {"M": 32, "ef_construction": 200, "ef_search": 100, "num_threads": 8}.
+                Only affects newly created collections. Existing collections keep
+                their original HNSW metadata; use rebuild_index() to apply changes.
         """
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -591,12 +604,38 @@ class VectorCollectionRepo:
         self._db_path = db_path
         self._current_config = {}
         self._text_splitter: Optional[RecursiveCharacterTextSplitter] = None
+        self._hnsw_config = hnsw_config or {}
+
+        # Build collection metadata. Existing collections will ignore new keys;
+        # get_or_create_collection only uses metadata when creating a new collection.
+        # ChromaDB 1.2.1 (Rust backend) only accepts hnsw:space, hnsw:M,
+        # hnsw:num_threads, hnsw:batch_size, hnsw:sync_threshold, hnsw:resize_factor
+        # at creation time. ef_search / ef_construction must be applied later via
+        # collection.modify().
+        _creation_allowed = {"space", "M", "num_threads", "batch_size", "sync_threshold", "resize_factor"}
+        collection_metadata = {"hnsw:space": "cosine"}
+        _runtime_hnsw = {}
+        for k, v in self._hnsw_config.items():
+            if k in _creation_allowed:
+                collection_metadata[f"hnsw:{k}"] = v
+            else:
+                _runtime_hnsw[k] = v
 
         # Get or create the actual Chroma collection
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine"}
+            metadata=collection_metadata
         )
+
+        # Apply runtime-tunable HNSW parameters (ef_search / ef_construction) if given.
+        # This works on existing collections too.
+        if _runtime_hnsw:
+            try:
+                modify_metadata = {f"hnsw:{k}": v for k, v in _runtime_hnsw.items()}
+                self._collection.modify(metadata=modify_metadata)
+                logger.info(f"Applied runtime HNSW tuning to '{collection_name}': {_runtime_hnsw}")
+            except Exception as e:
+                logger.warning(f"Could not apply runtime HNSW tuning to '{collection_name}': {e}")
 
         self.update_config(chunk_size, chunk_overlap)
 
@@ -620,6 +659,17 @@ class VectorCollectionRepo:
         # batch_size=32 is a safe default for CPUs and small GPUs.
         # If texts list is huge (e.g. 10k chunks), this processes them 32 at a time.
         return self._model.encode(texts, batch_size=32, show_progress_bar=False, convert_to_numpy=True)
+
+    @lru_cache(maxsize=1024)
+    def _cached_query_vector(self, query_text: str) -> Tuple[float, ...]:
+        """
+        Cache query embeddings to avoid re-encoding the same search text.
+
+        Returns a tuple (hashable) instead of ndarray so lru_cache can memoize.
+        LRU size 1024 covers the majority of repeated visitor queries.
+        """
+        vec = self._vectorize([query_text])[0]
+        return tuple(vec.tolist())
 
     def upsert_document(
             self,
@@ -784,12 +834,42 @@ class VectorCollectionRepo:
             print(f"[VectorRepo] Error deleting document {doc_id}: {e}")
             return False
 
+    @staticmethod
+    def _is_time_only_filter(filter_criteria: Optional[Dict[str, Any]]) -> bool:
+        """
+        Heuristic: decide whether a where-clause is only doing numeric range filtering
+        on known temporal fields. Such filters are often much slower in ChromaDB than
+        a plain vector search + in-memory filtering.
+        """
+        if not filter_criteria:
+            return False
+        # Allowed keys and operators for a "time-only" filter
+        time_keys = {"timestamp", "pub_timestamp", "archived_timestamp"}
+        range_ops = {"$gt", "$gte", "$lt", "$lte"}
+
+        def _clause_is_time_only(clause: Dict[str, Any]) -> bool:
+            for k, v in clause.items():
+                if k not in time_keys:
+                    return False
+                if not isinstance(v, dict):
+                    return False
+                for op in v.keys():
+                    if op not in range_ops:
+                        return False
+            return True
+
+        if "$and" in filter_criteria:
+            return all(_clause_is_time_only(c) for c in filter_criteria["$and"])
+        return _clause_is_time_only(filter_criteria)
+
     def search(
             self,
             query_text: str,
             top_n: int = 5,
             score_threshold: float = 0.0,
-            filter_criteria: Optional[Dict[str, Any]] = None
+            filter_criteria: Optional[Dict[str, Any]] = None,
+            force_db_filter: bool = False,
+            post_filter_multiplier: int = 10,
     ) -> List[Dict[str, Any]]:
         """
         Semantic search with metadata filtering and deduplication.
@@ -798,7 +878,13 @@ class VectorCollectionRepo:
             query_text (str): The search query.
             top_n (int): Number of unique documents to return.
             score_threshold (float): Minimum similarity score (0 to 1).
-            filter_criteria (Dict): MongoDB-style filter (e.g., {"category": "news"}).
+            filter_criteria (Dict): MongoDB-style filter (e.g. {"category": "news"}).
+            force_db_filter (bool): If True, always push filter_criteria to ChromaDB
+                using `where=`. If False, pure time-range filters are converted to
+                post-filtering (vector search without where, then filter in memory),
+                which is typically 10~50x faster on large collections.
+            post_filter_multiplier (int): When post-filtering, fetch this many more
+                candidates from HNSW to ensure enough results survive the filter.
 
         Returns:
             List[Dict]: List of result objects containing doc_id, score, text, metadata.
@@ -807,17 +893,29 @@ class VectorCollectionRepo:
         # 防止超大 top_n 导致内存与 Chroma 查询开销失控
         top_n = max(1, min(int(top_n), 100))
 
-        # Ensure _vectorize receives List[str], and we extract the first vector
-        query_vector = self._vectorize([query_text])[0].tolist()
+        # Decide whether to use DB-level filter or in-memory post-filter.
+        use_post_filter = (
+            filter_criteria is not None
+            and not force_db_filter
+            and self._is_time_only_filter(filter_criteria)
+        )
 
-        # Request more chunks than top_n because multiple chunks might come from same doc
-        fetch_k = min(top_n * 3, 300)
+        # Ensure _vectorize receives List[str], and we extract the first vector.
+        # Use cached embedding for single query text to avoid repeated encode cost.
+        query_vector = list(self._cached_query_vector(query_text))
+
+        # Request more chunks than top_n because multiple chunks might come from same doc.
+        # When post-filtering, fetch extra candidates to compensate for filtered-out rows.
+        if use_post_filter:
+            fetch_k = min(top_n * post_filter_multiplier, 5000)
+        else:
+            fetch_k = min(top_n * 3, 300)
 
         try:
             results = self._collection.query(
                 query_embeddings=[query_vector],
                 n_results=fetch_k,
-                where=filter_criteria,  # Apply metadata filtering at DB level
+                where=filter_criteria if not use_post_filter else None,
                 include=["metadatas", "documents", "distances"]
             )
         except Exception as e:
@@ -833,6 +931,43 @@ class VectorCollectionRepo:
         distances = results['distances'][0]
         metadatas = results['metadatas'][0]
         documents = results['documents'][0]
+
+        # If post-filtering on time ranges, evaluate the filter in memory.
+        # This avoids the expensive ChromaDB metadata sub-query + join while still
+        # preserving exact time semantics.
+        if use_post_filter and filter_criteria is not None:
+            def _matches_time_filter(meta: Dict[str, Any], clause: Dict[str, Any]) -> bool:
+                for key, expr in clause.items():
+                    value = meta.get(key)
+                    if value is None:
+                        return False
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        return False
+                    for op, target in expr.items():
+                        target = float(target)
+                        if op == "$gt" and not (value > target):
+                            return False
+                        if op == "$gte" and not (value >= target):
+                            return False
+                        if op == "$lt" and not (value < target):
+                            return False
+                        if op == "$lte" and not (value <= target):
+                            return False
+                return True
+
+            kept_indices = []
+            and_clauses = filter_criteria.get("$and", [filter_criteria])
+            for i in range(len(ids)):
+                if all(_matches_time_filter(metadatas[i], c) for c in and_clauses):
+                    kept_indices.append(i)
+            if not kept_indices:
+                return []
+            ids = [ids[i] for i in kept_indices]
+            distances = [distances[i] for i in kept_indices]
+            metadatas = [metadatas[i] for i in kept_indices]
+            documents = [documents[i] for i in kept_indices]
 
         # Standardize results into a list of dicts
         raw_candidates = []

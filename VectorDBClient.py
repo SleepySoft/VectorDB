@@ -576,12 +576,16 @@ class RemoteCollection:
             timeout: int = 30,
             wait: bool = True,
             poll_interval: float = 1.0,
+            force_db_filter: bool = False,
+            post_filter_multiplier: int = 10,
     ) -> List[Dict]:
         payload = {
             "query": query,
             "top_n": top_n,
             "score_threshold": score_threshold,
-            "filter_criteria": filter_criteria
+            "filter_criteria": filter_criteria,
+            "force_db_filter": force_db_filter,
+            "post_filter_multiplier": post_filter_multiplier,
         }
         resp = requests.post(f"{self.api_url}/search-jobs", json=payload, timeout=min(10, timeout))
         if resp.status_code == 202:
